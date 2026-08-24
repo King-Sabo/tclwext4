@@ -1,0 +1,97 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msbuild:
+    name: ${{ matrix.platform }} ${{ matrix.configuration }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ x64, Win32 ]
+        configuration: [ Debug, Release ]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        run: >
+          msbuild tclwext4.sln
+          /p:Configuration=${{ matrix.configuration }}
+          /p:Platform=${{ matrix.platform }}
+          /m
+          /warnaserror
+
+      - name: Check plugin was produced
+        shell: pwsh
+        run: |
+          $ext = if ('${{ matrix.platform }}' -eq 'x64') { 'wfx64' } else { 'wfx' }
+          $out = "build/${{ matrix.platform }}/${{ matrix.configuration }}/tclwext4.$ext"
+          if (-not (Test-Path $out)) { throw "missing $out" }
+          Get-Item $out | Format-List Name, Length
+
+      # NOT a release. Artifacts expire, require a GitHub login to fetch, and
+      # exist so a contributor can confirm their change compiles - see the
+      # "No binary releases" section of README.md.
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ci-build-${{ matrix.platform }}-${{ matrix.configuration }}
+          path: build/${{ matrix.platform }}/${{ matrix.configuration }}/tclwext4.wfx*
+          retention-days: 7
+          if-no-files-found: error
+
+  cmake:
+    name: cmake x64 Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure and build
+        run: |
+          cmake --preset vs2022-x64
+          cmake --build --preset x64-release
+
+  bootstrap-fallback:
+    # Checks out WITHOUT submodules on purpose, to exercise the FetchLwext4
+    # target in lwext4.vcxproj. This is the path that silently produced an empty
+    # static library when .gitmodules existed with no gitlink in the index, so it
+    # is worth a dedicated job rather than trusting it.
+    name: submodule bootstrap
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Confirm lwext4 is absent before building
+        shell: pwsh
+        run: |
+          if (Test-Path external/lwext4/src/ext4.c) {
+            throw "lwext4 present - this job must start without it"
+          }
+
+      - name: Build (must fetch lwext4 itself)
+        run: msbuild tclwext4.sln /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Confirm it fetched and linked
+        shell: pwsh
+        run: |
+          if (-not (Test-Path external/lwext4/src/ext4.c)) { throw "lwext4 was not fetched" }
+          if (-not (Test-Path build/x64/Release/tclwext4.wfx64)) { throw "plugin not built" }

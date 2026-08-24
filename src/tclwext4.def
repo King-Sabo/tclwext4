@@ -1,0 +1,31 @@
+EXPORTS
+    FsInit
+    FsFindFirst
+    FsFindNext
+    FsFindClose
+    FsGetDefRootName
+    FsSetDefaultParams
+    FsGetBackgroundFlags
+
+    FsInitW
+    FsFindFirstW
+    FsFindNextW
+    FsGetFileW
+    FsPutFileW
+    FsMkDirW
+    FsDeleteFileW
+    FsRemoveDirW
+    FsRenMovFileW
+    FsSetTimeW
+    FsSetAttrW
+    FsStatusInfoW
+    FsDisconnectW
+    FsExecuteFileW
+    FsExtractCustomIconW
+
+    FsContentGetSupportedField
+    FsContentGetSupportedFieldFlags
+    FsContentGetValue
+    FsContentGetValueW
+    FsContentStopGetValueW
+    FsContentPluginUnloading

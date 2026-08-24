@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration><Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration><Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration><Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration><Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{6B2F8C1A-9D3E-4A57-8B21-0C4E7F9A1D33}</ProjectGuid>
+    <RootNamespace>lwext4</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+    <WholeProgramOptimization Condition="'$(Configuration)'=='Release'">false</WholeProgramOptimization>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard_C>stdc11</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(ProjectDir)config;$(ProjectDir)external\lwext4\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!--
+        lwext4 configuration lives in config/generated/ext4_config.h, which
+        lwext4's own ext4_config.h includes. Do not add CONFIG_* defines here:
+        the header is shared by both projects, which is what keeps the static
+        library and the DLL agreeing on struct layouts.
+      -->
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <WarningLevel>Level3</WarningLevel>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+      <FunctionLevelLinking Condition="'$(Configuration)'=='Release'">true</FunctionLevelLinking>
+      <IntrinsicFunctions Condition="'$(Configuration)'=='Release'">true</IntrinsicFunctions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!--
+    Sources are listed explicitly rather than globbed. MSBuild expands wildcards
+    during project EVALUATION, which happens before any target runs - so on a
+    fresh clone a glob would resolve to nothing and the FetchLwext4 target below
+    would fix the checkout too late to affect the same build. An explicit list
+    has no evaluation-time dependency on the submodule being present.
+
+    On a submodule bump, re-sync this list against external/lwext4/src/*.c.
+  -->
+  <ItemGroup>
+    <ClCompile Include="external\lwext4\src\ext4.c" />
+    <ClCompile Include="external\lwext4\src\ext4_balloc.c" />
+    <ClCompile Include="external\lwext4\src\ext4_bcache.c" />
+    <ClCompile Include="external\lwext4\src\ext4_bitmap.c" />
+    <ClCompile Include="external\lwext4\src\ext4_block_group.c" />
+    <ClCompile Include="external\lwext4\src\ext4_blockdev.c" />
+    <ClCompile Include="external\lwext4\src\ext4_crc32.c" />
+    <ClCompile Include="external\lwext4\src\ext4_debug.c" />
+    <ClCompile Include="external\lwext4\src\ext4_dir.c" />
+    <ClCompile Include="external\lwext4\src\ext4_dir_idx.c" />
+    <ClCompile Include="external\lwext4\src\ext4_extent.c" />
+    <ClCompile Include="external\lwext4\src\ext4_fs.c" />
+    <ClCompile Include="external\lwext4\src\ext4_hash.c" />
+    <ClCompile Include="external\lwext4\src\ext4_ialloc.c" />
+    <ClCompile Include="external\lwext4\src\ext4_inode.c" />
+    <ClCompile Include="external\lwext4\src\ext4_journal.c" />
+    <ClCompile Include="external\lwext4\src\ext4_mbr.c" />
+    <ClCompile Include="external\lwext4\src\ext4_mkfs.c" />
+    <ClCompile Include="external\lwext4\src\ext4_super.c" />
+    <ClCompile Include="external\lwext4\src\ext4_trans.c" />
+    <ClCompile Include="external\lwext4\src\ext4_xattr.c" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+  <!--
+    Bootstrap lwext4 on first build. Runs before PrepareForBuild so headers and
+    sources exist by the time CL is invoked. No-op once checked out.
+
+    Two stages. A submodule update exits 0 and does NOTHING when .gitmodules
+    lists a path that has no gitlink in the index (i.e. the submodule was never
+    actually added). Stage 2 clones directly, which also covers plain source
+    downloads with no .git at all.
+  -->
+  <PropertyGroup>
+    <Lwext4Dir>$(ProjectDir)external\lwext4</Lwext4Dir>
+    <Lwext4Probe>$(Lwext4Dir)\src\ext4.c</Lwext4Probe>
+    <Lwext4Url>https://github.com/gkostka/lwext4.git</Lwext4Url>
+  </PropertyGroup>
+
+  <Target Name="FetchLwext4" BeforeTargets="PrepareForBuild"
+          Condition="!Exists('$(Lwext4Probe)')">
+
+    <Message Importance="high" Text="lwext4 not present - fetching..." />
+
+    <!-- Stage 1: proper submodule checkout, if a gitlink exists. -->
+    <Exec Condition="Exists('$(ProjectDir).git')"
+          Command="git submodule update --init --recursive"
+          WorkingDirectory="$(ProjectDir)"
+          ContinueOnError="true" />
+
+    <!-- Stage 2: no gitlink, no .git, or stage 1 was a no-op. -->
+    <Exec Condition="!Exists('$(Lwext4Probe)')"
+          Command="git clone --depth 1 &quot;$(Lwext4Url)&quot; &quot;$(Lwext4Dir)&quot;"
+          WorkingDirectory="$(ProjectDir)"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="Lwext4CloneExit" />
+    </Exec>
+
+    <Error Condition="!Exists('$(Lwext4Probe)')"
+           Text="Could not obtain lwext4. Last clone exit code: $(Lwext4CloneExit). Check that git is on PATH and that $(Lwext4Dir) is absent or empty, or clone $(Lwext4Url) into it by hand." />
+
+    <Message Importance="high" Text="lwext4 ready at $(Lwext4Dir)" />
+  </Target>
+
+</Project>

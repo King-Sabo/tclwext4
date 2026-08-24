@@ -1,0 +1,6 @@
+[plugininstall]
+description=ext2/3/4 read/write access via lwext4
+type=wfx
+file=tclwext4.wfx
+file64=tclwext4.wfx64
+defaultdir=tclwext4
