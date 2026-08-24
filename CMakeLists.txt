@@ -54,6 +54,10 @@ target_include_directories(lwext4 PUBLIC
 # ext4_config.h through ext4.h - are guaranteed to see identical struct layouts.
 target_compile_definitions(lwext4 PUBLIC _CRT_SECURE_NO_WARNINGS)
 target_compile_options(lwext4 PRIVATE /wd4244 /wd4267 /wd4996)
+# lwext4 needs C11; the .vcxproj sets LanguageStandard_C=stdc11 and CMake must
+# match or MSVC uses its older default C mode.
+set_property(TARGET lwext4 PROPERTY C_STANDARD 11)
+set_property(TARGET lwext4 PROPERTY C_STANDARD_REQUIRED ON)
 set_property(TARGET lwext4 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # ---------------------------------------------------------------------------
@@ -72,6 +76,10 @@ add_library(tclwext4 SHARED
 
 target_link_libraries(tclwext4 PRIVATE lwext4)
 target_compile_definitions(tclwext4 PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(tclwext4 PRIVATE /wd4244 /wd4267 /wd4996)
+target_include_directories(tclwext4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set_property(TARGET tclwext4 PROPERTY C_STANDARD 11)
+set_property(TARGET tclwext4 PROPERTY C_STANDARD_REQUIRED ON)
 set_property(TARGET tclwext4 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # TC expects .wfx for 32-bit and .wfx64 for 64-bit, same base name.

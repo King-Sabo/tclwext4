@@ -47,7 +47,8 @@ void tcl_manage_images(HWND parent, int preselect);
 void tcl_remove_all_images(void);
 
 /* Shared with tcl_dialog.c so the dialog can show where settings live. */
-wchar_t g_ini_path_w[MAX_PATH] = { 0 };
+wchar_t   g_ini_path_w[MAX_PATH] = { 0 };
+HINSTANCE g_hinst = NULL;
 void tcl_save_images(void) { save_images(); }
 
 /* --------------------------------------------------------- find handle */
@@ -1036,7 +1037,9 @@ BOOL __stdcall FsFindNext(HANDLE Hdl, WIN32_FIND_DATAA *FindData)
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID reserved)
 {
-    (void)h; (void)reserved;
+    (void)reserved;
+    if (reason == DLL_PROCESS_ATTACH)
+        g_hinst = h;
     if (reason == DLL_PROCESS_DETACH && g_inited) {
         tcl_vol_unmount_all();
         ext4_device_unregister_all();

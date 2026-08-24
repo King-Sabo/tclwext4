@@ -25,7 +25,8 @@
 
 extern wchar_t g_images[TCL_MAX_IMAGES][MAX_PATH];
 extern int     g_image_count;
-extern wchar_t g_ini_path_w[MAX_PATH];
+extern wchar_t   g_ini_path_w[MAX_PATH];
+extern HINSTANCE g_hinst;
 
 void tcl_save_images(void);
 
@@ -34,7 +35,6 @@ void tcl_save_images(void);
 typedef struct {
     BYTE  *buf;
     size_t used;
-    size_t cap;
 } tmpl;
 
 static void t_align(tmpl *t)
@@ -174,7 +174,7 @@ static INT_PTR CALLBACK dlg_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 void tcl_manage_images(HWND parent, int preselect)
 {
     BYTE  raw[2048];
-    tmpl  t = { raw, 0, sizeof(raw) };
+    tmpl  t = { raw, 0 };
 
     ZeroMemory(raw, sizeof(raw));
 
@@ -201,7 +201,7 @@ void tcl_manage_images(HWND parent, int preselect)
     t_item(&t, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
            253, 140, 80, 16, IDCANCEL, 0x0080, L"&Close");
 
-    DialogBoxIndirectParamW(GetModuleHandleW(NULL), (LPCDLGTEMPLATEW)raw,
+    DialogBoxIndirectParamW(g_hinst, (LPCDLGTEMPLATEW)raw,
                             parent, dlg_proc, (LPARAM)preselect);
 
     EnterCriticalSection(&g_ext4_cs);

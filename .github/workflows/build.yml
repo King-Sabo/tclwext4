@@ -26,13 +26,16 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v2
 
+      # No /warnaserror: it would apply to the lwext4 submodule as well, and
+      # upstream is not warning-clean under MSVC /W3. Scope it to tclwext4's own
+      # sources once they are.
       - name: Build
         run: >
           msbuild tclwext4.sln
           /p:Configuration=${{ matrix.configuration }}
           /p:Platform=${{ matrix.platform }}
           /m
-          /warnaserror
+          /v:minimal
 
       - name: Check plugin was produced
         shell: pwsh
@@ -61,10 +64,45 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Configure and build
+      # Diagnostics first: the two most common causes of a CMake-only failure
+      # here are the CMake version and which Visual Studio the runner image
+      # actually has.
+      - name: Toolchain versions
+        shell: pwsh
         run: |
-          cmake --preset vs2022-x64
-          cmake --build --preset x64-release
+          cmake --version
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            & $vswhere -products * -format value -property displayName
+            & $vswhere -products * -format value -property installationVersion
+          } else { "vswhere not found" }
+
+      # Deliberately NOT using the vs2022-* presets: they pin
+      # "Visual Studio 17 2022", which breaks the moment the runner image ships
+      # a different Visual Studio. Letting CMake pick its default generator
+      # tracks whatever is installed. The presets stay in the repo for humans.
+      - name: Configure
+        run: cmake -S . -B build/x64 -A x64
+
+      - name: Build
+        run: cmake --build build/x64 --config Release
+
+      - name: Check plugin was produced
+        shell: pwsh
+        run: |
+          $out = Get-ChildItem -Recurse -Path build/x64 -Filter tclwext4.wfx64 -ErrorAction SilentlyContinue
+          if (-not $out) { throw "tclwext4.wfx64 not produced" }
+          $out | Format-List FullName, Length
+
+      - name: Show CMake logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          foreach ($f in 'build/x64/CMakeFiles/CMakeConfigureLog.yaml',
+                         'build/x64/CMakeFiles/CMakeError.log',
+                         'build/x64/CMakeCache.txt') {
+            if (Test-Path $f) { "===== $f ====="; Get-Content $f -Tail 120 }
+          }
 
   bootstrap-fallback:
     # Checks out WITHOUT submodules on purpose, to exercise the FetchLwext4
