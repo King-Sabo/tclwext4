@@ -328,6 +328,20 @@ resolution follows them everywhere.
 - Write-back caching is enabled for multi-file operations and flushed at the end
   of each file, so an abort costs at most the file in flight.
 
+## Versioning
+
+`src/version.h` is the single source of truth. It feeds `src/tclwext4.rc`
+(so Explorer's Properties tab and Total Commander's plugin list show a real
+version), the line written to TC's log at startup, and the caption of the
+manage-images dialog — so those can never disagree.
+
+`OriginalFilename` differs per bitness. Both build systems define
+`TCLWEXT4_WFX64` for 64-bit builds rather than relying on `_WIN64`, which
+`rc.exe` is not guaranteed to have defined.
+
+The resource carries `VS_FF_PRERELEASE`, and `VS_FF_DEBUG` in Debug builds.
+Drop the prerelease flag when the plugin stops being one.
+
 ## License
 
 **tclwext4 is GPL-2.0-or-later.** Not by preference — lwext4 is mixed-licensed,

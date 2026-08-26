@@ -64,28 +64,37 @@ jobs:
         with:
           submodules: recursive
 
-      # Diagnostics first: the two most common causes of a CMake-only failure
-      # here are the CMake version and which Visual Studio the runner image
-      # actually has.
+      # Everything below tees into ci-logs/ and is uploaded as an artifact on
+      # failure. The Actions web UI sometimes renders a bare "Error:" with no
+      # expandable body; a downloadable log file is immune to that.
       - name: Toolchain versions
         shell: pwsh
         run: |
-          cmake --version
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vswhere) {
-            & $vswhere -products * -format value -property displayName
-            & $vswhere -products * -format value -property installationVersion
-          } else { "vswhere not found" }
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          & {
+            cmake --version
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vswhere) {
+              & $vswhere -products * -format value -property displayName
+              & $vswhere -products * -format value -property installationVersion
+            } else { "vswhere not found" }
+            "--- submodule state ---"
+            git submodule status
+            if (Test-Path external/lwext4/src/ext4.c) { "lwext4 present" }
+            else { "lwext4 ABSENT - CMake will clone it" }
+          } 2>&1 | Tee-Object ci-logs/toolchain.txt
 
-      # Deliberately NOT using the vs2022-* presets: they pin
-      # "Visual Studio 17 2022", which breaks the moment the runner image ships
-      # a different Visual Studio. Letting CMake pick its default generator
-      # tracks whatever is installed. The presets stay in the repo for humans.
       - name: Configure
-        run: cmake -S . -B build/x64 -A x64
+        shell: pwsh
+        run: |
+          cmake -S . -B build/x64 -A x64 2>&1 | Tee-Object ci-logs/configure.txt
+          if ($LASTEXITCODE -ne 0) { throw "configure failed with $LASTEXITCODE" }
 
       - name: Build
-        run: cmake --build build/x64 --config Release
+        shell: pwsh
+        run: |
+          cmake --build build/x64 --config Release 2>&1 | Tee-Object ci-logs/build.txt
+          if ($LASTEXITCODE -ne 0) { throw "build failed with $LASTEXITCODE" }
 
       - name: Check plugin was produced
         shell: pwsh
@@ -94,15 +103,26 @@ jobs:
           if (-not $out) { throw "tclwext4.wfx64 not produced" }
           $out | Format-List FullName, Length
 
-      - name: Show CMake logs on failure
-        if: failure()
+      - name: Collect CMake logs
+        if: always()
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
           foreach ($f in 'build/x64/CMakeFiles/CMakeConfigureLog.yaml',
                          'build/x64/CMakeFiles/CMakeError.log',
+                         'build/x64/CMakeFiles/CMakeOutput.log',
                          'build/x64/CMakeCache.txt') {
-            if (Test-Path $f) { "===== $f ====="; Get-Content $f -Tail 120 }
+            if (Test-Path $f) { Copy-Item $f ci-logs/ -Force }
           }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-ci-logs
+          path: ci-logs/
+          retention-days: 7
+          if-no-files-found: warn
 
   bootstrap-fallback:
     # Checks out WITHOUT submodules on purpose, to exercise the FetchLwext4

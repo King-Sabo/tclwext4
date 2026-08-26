@@ -16,6 +16,7 @@
 #include "wfxplugin.h"
 #include "ext4_inode.h"
 #include "ext4_super.h"
+#include "version.h"
 #include <stdio.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -170,6 +171,8 @@ int __stdcall FsInitW(int PluginNr, tProgressProcW pProgressProc,
         InitializeCriticalSection(&g_ext4_cs);
         g_inited = true;
     }
+    tcl_logf(L"tclwext4 " TCLWEXT4_VER_STRINGW L" (%d-bit)",
+             (int)(sizeof(void *) * 8));
     return 0;
 }
 

@@ -17,6 +17,7 @@
 #include "wfxplugin.h"
 #include <windowsx.h>
 #include <stdio.h>
+#include "version.h"
 
 #define ID_LIST      1001
 #define ID_REMOVE    1002
@@ -187,7 +188,7 @@ void tcl_manage_images(HWND parent, int preselect)
     t_word(&t, 340); t_word(&t, 170);
     t_word(&t, 0);              /* no menu */
     t_word(&t, 0);              /* default class */
-    t_str(&t, L"tclwext4 - remembered disk images");
+    t_str(&t, L"tclwext4 " TCLWEXT4_VER_STRINGW L" - remembered disk images");
     t_word(&t, 8);
     t_str(&t, L"Segoe UI");
 

@@ -1,0 +1,55 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * tclwext4.rc - VERSIONINFO for the plugin DLL.
+ *
+ * OriginalFilename must match the actual output name, which differs per
+ * bitness (.wfx vs .wfx64). Both build systems define TCLWEXT4_WFX64 for the
+ * 64-bit configuration rather than relying on _WIN64, which rc.exe is not
+ * guaranteed to have defined for it.
+ */
+#include <windows.h>
+#include "version.h"
+
+#ifdef TCLWEXT4_WFX64
+#  define TCLWEXT4_FILENAME "tclwext4.wfx64"
+#else
+#  define TCLWEXT4_FILENAME "tclwext4.wfx"
+#endif
+
+#ifdef _DEBUG
+#  define TCLWEXT4_FILEFLAGS (VS_FF_PRERELEASE | VS_FF_DEBUG)
+#else
+#  define TCLWEXT4_FILEFLAGS (VS_FF_PRERELEASE)
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    TCLWEXT4_VER_RC
+    PRODUCTVERSION TCLWEXT4_VER_RC
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      TCLWEXT4_FILEFLAGS
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_DLL
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        /* 040904B0 = US English, Unicode */
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "CodeCutters"
+            VALUE "FileDescription",  "Total Commander file system plugin for ext2/3/4 (lwext4)"
+            VALUE "FileVersion",      TCLWEXT4_VER_STRING
+            VALUE "InternalName",     "tclwext4"
+            VALUE "OriginalFilename", TCLWEXT4_FILENAME
+            VALUE "ProductName",      "tclwext4"
+            VALUE "ProductVersion",   TCLWEXT4_VER_STRING
+            VALUE "LegalCopyright",   "Copyright (C) 2026 King Sabo. GPL-2.0-or-later."
+            VALUE "Comments",         "Writes ext2/3/4 through lwext4, a partial reimplementation. Use at your own risk; data loss is possible. See README.md."
+        END
+    END
+
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

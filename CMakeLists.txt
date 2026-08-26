@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(tclwext4 C)
+enable_language(RC)
 
 if(NOT MSVC)
     message(FATAL_ERROR "tclwext4 targets MSVC (Visual Studio 2022) only")
@@ -53,7 +54,8 @@ target_include_directories(lwext4 PUBLIC
 # it in a header rather than in defines means the plugin sources - which reach
 # ext4_config.h through ext4.h - are guaranteed to see identical struct layouts.
 target_compile_definitions(lwext4 PUBLIC _CRT_SECURE_NO_WARNINGS)
-target_compile_options(lwext4 PRIVATE /wd4244 /wd4267 /wd4996)
+# C4005: ext4_misc.h defines its own offsetof, clashing with ucrt stddef.h.
+target_compile_options(lwext4 PRIVATE /wd4244 /wd4267 /wd4996 /wd4005)
 # lwext4 needs C11; the .vcxproj sets LanguageStandard_C=stdc11 and CMake must
 # match or MSVC uses its older default C mode.
 set_property(TARGET lwext4 PROPERTY C_STANDARD 11)
@@ -71,13 +73,19 @@ add_library(tclwext4 SHARED
     src/tcl_util.c
     src/tcl_content.c
     src/tcl_dialog.c
+    src/tclwext4.rc
     src/tclwext4.def
 )
 
 target_link_libraries(tclwext4 PRIVATE lwext4)
 target_compile_definitions(tclwext4 PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
-target_compile_options(tclwext4 PRIVATE /wd4244 /wd4267 /wd4996)
+target_compile_options(tclwext4 PRIVATE /wd4244 /wd4267 /wd4996 /wd4005)
 target_include_directories(tclwext4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# The .rc picks OriginalFilename from this; rc.exe cannot be relied on to have
+# _WIN64 defined, so state the bitness explicitly.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    target_compile_definitions(tclwext4 PRIVATE TCLWEXT4_WFX64)
+endif()
 set_property(TARGET tclwext4 PROPERTY C_STANDARD 11)
 set_property(TARGET tclwext4 PROPERTY C_STANDARD_REQUIRED ON)
 set_property(TARGET tclwext4 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
