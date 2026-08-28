@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}</ProjectGuid>
+    <RootNamespace>fatfs</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset Condition="'$(PlatformToolset)'==''">v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <FatFsSrc>$(ProjectDir)external\fatfs\source</FatFsSrc>
+    <FatFsBuild>$(SolutionDir)build\fatfs</FatFsBuild>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard_C>stdc11</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(FatFsBuild);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <WarningLevel>Level3</WarningLevel>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <PropertyGroup>
+    <FatFsUrl>https://github.com/abbrev/fatfs.git</FatFsUrl>
+    <FatFsDir>$(ProjectDir)external\fatfs</FatFsDir>
+  </PropertyGroup>
+
+  <!--
+    Same two-stage bootstrap as lwext4: a submodule update exits 0 and does
+    nothing when .gitmodules lists a path with no gitlink in the index, so a
+    direct clone is the fallback. FetchLwext4 in lwext4.vcxproj cannot cover
+    this - it is conditioned on lwext4 being absent, and this project may build
+    first in any case.
+  -->
+  <Target Name="FetchFatFs" Condition="!Exists('$(FatFsDir)\source\ff.c')">
+    <Message Importance="high" Text="FatFs not present - fetching..." />
+
+    <Exec Condition="Exists('$(ProjectDir).git')"
+          Command="git submodule update --init --recursive"
+          WorkingDirectory="$(ProjectDir)"
+          ContinueOnError="true" />
+
+    <Exec Condition="!Exists('$(FatFsDir)\source\ff.c')"
+          Command="git clone --depth 1 &quot;$(FatFsUrl)&quot; &quot;$(FatFsDir)&quot;"
+          WorkingDirectory="$(ProjectDir)"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="FatFsCloneExit" />
+    </Exec>
+
+    <Error Condition="!Exists('$(FatFsDir)\source\ff.c')"
+           Text="Could not obtain FatFs. Last clone exit code: $(FatFsCloneExit). Check that git is on PATH and that $(FatFsDir) is absent or empty, or clone $(FatFsUrl) into it by hand." />
+  </Target>
+
+  <!--
+    FatFs has no #ifndef-guarded knobs: ff.h includes "ffconf.h" with a quoted
+    include, resolved against ff.h's own directory before any /I path. So the
+    only way to configure it without editing the submodule is to stage the
+    sources elsewhere and put our ffconf.h beside them. external/fatfs stays
+    pristine, exactly like external/lwext4.
+  -->
+  <Target Name="StageFatFs" BeforeTargets="PrepareForBuild" DependsOnTargets="FetchFatFs"
+          Inputs="$(FatFsSrc)\ff.c;$(FatFsSrc)\ff.h;$(FatFsSrc)\ffunicode.c;$(FatFsSrc)\ffsystem.c;$(FatFsSrc)\diskio.h;$(ProjectDir)config\ffconf.h"
+          Outputs="$(FatFsBuild)\ff.c;$(FatFsBuild)\ff.h;$(FatFsBuild)\ffunicode.c;$(FatFsBuild)\ffsystem.c;$(FatFsBuild)\diskio.h;$(FatFsBuild)\ffconf.h">
+    <MakeDir Directories="$(FatFsBuild)" />
+    <Copy SourceFiles="$(FatFsSrc)\ff.c;$(FatFsSrc)\ff.h;$(FatFsSrc)\ffunicode.c;$(FatFsSrc)\ffsystem.c;$(FatFsSrc)\diskio.h"
+          DestinationFolder="$(FatFsBuild)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)config\ffconf.h"
+          DestinationFolder="$(FatFsBuild)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <ClCompile Include="$(SolutionDir)build\fatfs\ff.c" />
+    <ClCompile Include="$(SolutionDir)build\fatfs\ffunicode.c" />
+    <ClCompile Include="$(SolutionDir)build\fatfs\ffsystem.c" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

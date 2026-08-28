@@ -146,6 +146,126 @@ bool tcl_probe_ext(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_par
     return true;
 }
 
+/* ------------------------------------------------------------ FAT probe */
+
+/*
+ * Recognise a FAT12/16/32 BPB. Deliberately strict: a loose check would claim
+ * partitions that merely look plausible, and this plugin writes.
+ *
+ * Only ever called for image partitions. On a physical disk Windows mounts FAT
+ * itself and caches the same sectors, with nothing arbitrating between its
+ * cache and ours; an image file has no second writer.
+ */
+bool tcl_probe_fat(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_part *p)
+{
+    uint8_t bs[512];
+    uint16_t bytes_per_sec, rsvd, root_ents;
+    uint8_t  spc, nfats;
+    uint32_t tot16, tot32, fatsz16, fatsz32, fatsz, tot, rootsecs, datasecs, clusters;
+    const wchar_t *why = NULL;
+    bool looks_fatty = false;
+    int i;
+
+    /*
+     * Every rejection below is logged when the sector carries a boot signature,
+     * i.e. when it plausibly was meant to be a filesystem. Silent rejection here
+     * is what makes "my ESP does not show up" impossible to diagnose.
+     */
+    if (size < 64 * 1024) {
+        why = L"partition smaller than 64 KiB";
+        goto reject;
+    }
+    if (!tcl_read_at(h, off, bs, sizeof(bs), sect)) {
+        why = L"could not read boot sector";
+        goto reject;
+    }
+    if (rd16(bs, 510) != 0xAA55) {
+        why = L"no 0xAA55 boot signature";
+        goto reject;
+    }
+    looks_fatty = true;
+
+    bytes_per_sec = rd16(bs, 11);
+    spc           = bs[13];
+    rsvd          = rd16(bs, 14);
+    nfats         = bs[16];
+    root_ents     = rd16(bs, 17);
+    tot16         = rd16(bs, 19);
+    fatsz16       = rd16(bs, 22);
+    tot32         = rd32(bs, 32);
+    fatsz32       = rd32(bs, 36);
+
+    /* A boot jump is conventional but not universal: some images are built by
+       copying a filesystem without one. Warn rather than reject. */
+    if (bs[0] != 0xEB && bs[0] != 0xE9 && bs[0] != 0x49)
+        tcl_logf(L"tclwext4: scan: partition at %llu has no boot jump (0x%02X), continuing",
+                 (unsigned long long)off, bs[0]);
+
+    if (bytes_per_sec != 512 && bytes_per_sec != 1024 &&
+        bytes_per_sec != 2048 && bytes_per_sec != 4096) {
+        why = L"bytes-per-sector not 512/1024/2048/4096";
+        goto reject;
+    }
+    if (!spc || (spc & (spc - 1))) {
+        why = L"sectors-per-cluster not a power of two";
+        goto reject;
+    }
+    if (!rsvd || nfats < 1 || nfats > 2) {
+        why = L"reserved sectors or FAT count out of range";
+        goto reject;
+    }
+
+    fatsz = fatsz16 ? fatsz16 : fatsz32;
+    tot   = tot16 ? tot16 : tot32;
+    if (!fatsz || !tot) {
+        why = L"FAT size or total sector count is zero";
+        goto reject;
+    }
+
+    rootsecs = ((uint32_t)root_ents * 32 + bytes_per_sec - 1) / bytes_per_sec;
+    if (tot < rsvd + (uint32_t)nfats * fatsz + rootsecs) {
+        why = L"geometry does not fit the declared sector count";
+        goto reject;
+    }
+    datasecs = tot - (rsvd + (uint32_t)nfats * fatsz + rootsecs);
+    clusters = datasecs / spc;
+    if (!clusters) {
+        why = L"no data clusters";
+        goto reject;
+    }
+
+    p->offset     = off;
+    p->size       = size;
+    p->sector     = sect;
+    p->fskind     = TCL_FSK_FAT;
+    p->block_size = (uint32_t)bytes_per_sec * spc;
+    p->blocks     = clusters;
+    p->mountable  = true;
+    p->force_ro   = false;
+    p->ro_reason[0] = 0;
+
+    /* Volume label: FAT32 keeps it at 71, FAT12/16 at 43. Space padded, not
+       NUL terminated. */
+    {
+        int lbl = (clusters >= 65525) ? 71 : 43;
+        for (i = 0; i < 11; i++)
+            p->fslabel[i] = (unsigned char)bs[lbl + i];
+        p->fslabel[11] = 0;
+        for (i = 10; i >= 0 && p->fslabel[i] == L' '; i--)
+            p->fslabel[i] = 0;
+    }
+
+    tcl_logf(L"tclwext4: scan: FAT at %llu, %u clusters of %u bytes, label '%s'",
+             (unsigned long long)off, clusters, p->block_size, p->fslabel);
+    return true;
+
+reject:
+    if (looks_fatty)
+        tcl_logf(L"tclwext4: scan: partition at %llu is not usable FAT: %s",
+                 (unsigned long long)off, why);
+    return false;
+}
+
 /* --------------------------------------------------- image table parse */
 
 static void add_part(tcl_part *out, int max, int *n, HANDLE h,
@@ -159,8 +279,19 @@ static void add_part(tcl_part *out, int max, int *n, HANDLE h,
         return;
 
     ZeroMemory(&p, sizeof(p));
-    if (!tcl_probe_ext(h, off, size, sect, &p))
+    if (tcl_probe_ext(h, off, size, sect, &p)) {
+        p.fskind = TCL_FSK_EXT;
+    } else if (kind == TCL_SRC_IMAGE && tcl_probe_fat(h, off, size, sect, &p)) {
+        /* images only - deliberately not attempted on physical disks */
+    } else {
+        tcl_logf(L"tclwext4: scan: skipping partition %d at %llu (%llu bytes) - "
+                 L"no recognised filesystem%s",
+                 part_no, (unsigned long long)off, (unsigned long long)size,
+                 kind == TCL_SRC_DISK ? L" (FAT not attempted on physical disks)" : L"");
         return;
+    }
+    tcl_logf(L"tclwext4: scan: partition %d at %llu -> %s", part_no,
+             (unsigned long long)off, p.fskind == TCL_FSK_FAT ? L"FAT" : L"ext");
 
     wcsncpy_s(p.backing, MAX_PATH, backing, _TRUNCATE);
     p.kind    = kind;

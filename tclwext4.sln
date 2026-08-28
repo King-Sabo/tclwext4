@@ -6,6 +6,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tclwext4", "tclwext4.vcxpro
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "lwext4", "lwext4.vcxproj", "{6B2F8C1A-9D3E-4A57-8B21-0C4E7F9A1D33}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "fatfs", "fatfs.vcxproj", "{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -30,6 +32,14 @@ Global
 		{6B2F8C1A-9D3E-4A57-8B21-0C4E7F9A1D33}.Release|Win32.Build.0 = Release|Win32
 		{6B2F8C1A-9D3E-4A57-8B21-0C4E7F9A1D33}.Release|x64.ActiveCfg = Release|x64
 		{6B2F8C1A-9D3E-4A57-8B21-0C4E7F9A1D33}.Release|x64.Build.0 = Release|x64
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Debug|Win32.ActiveCfg = Debug|Win32
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Debug|Win32.Build.0 = Debug|Win32
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Debug|x64.ActiveCfg = Debug|x64
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Debug|x64.Build.0 = Debug|x64
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Release|Win32.ActiveCfg = Release|Win32
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Release|Win32.Build.0 = Release|Win32
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Release|x64.ActiveCfg = Release|x64
+		{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,3 +1,6 @@
 [submodule "external/lwext4"]
 	path = external/lwext4
 	url = https://github.com/gkostka/lwext4.git
+[submodule "external/fatfs"]
+	path = external/fatfs
+	url = https://github.com/abbrev/fatfs.git

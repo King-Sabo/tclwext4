@@ -144,6 +144,9 @@ jobs:
           if (Test-Path external/lwext4/src/ext4.c) {
             throw "lwext4 present - this job must start without it"
           }
+          if (Test-Path external/fatfs/source/ff.c) {
+            throw "fatfs present - this job must start without it"
+          }
 
       - name: Build (must fetch lwext4 itself)
         run: msbuild tclwext4.sln /p:Configuration=Release /p:Platform=x64 /m
@@ -152,4 +155,5 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path external/lwext4/src/ext4.c)) { throw "lwext4 was not fetched" }
+          if (-not (Test-Path external/fatfs/source/ff.c)) { throw "fatfs was not fetched" }
           if (-not (Test-Path build/x64/Release/tclwext4.wfx64)) { throw "plugin not built" }

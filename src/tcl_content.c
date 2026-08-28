@@ -13,6 +13,7 @@
  */
 #include "tclwext4.h"
 #include "wfxplugin.h"
+#include "tcl_fs.h"
 #include <stdio.h>
 
 enum {
@@ -130,8 +131,10 @@ int __stdcall FsContentGetValueW(WCHAR *FileName, int FieldIndex, int UnitIndex,
         return ft_stringw;
 
     case FLD_TYPE:
-        put_w(FieldValue, maxlen,
-              v->part.kind == TCL_SRC_IMAGE ? L"image" : L"partition");
+        swprintf_s(buf, _countof(buf), L"%s / %s",
+                   v->part.kind == TCL_SRC_IMAGE ? L"image" : L"partition",
+                   v->part.fskind == TCL_FSK_FAT ? L"FAT" : L"ext");
+        put_w(FieldValue, maxlen, buf);
         LeaveCriticalSection(&g_ext4_cs);
         return ft_stringw;
 
@@ -184,30 +187,32 @@ int __stdcall FsContentGetValueW(WCHAR *FileName, int FieldIndex, int UnitIndex,
         return ft_numeric_64;
 
     case FLD_FREE: {
-        struct ext4_mount_stats st;
-        int64_t freeb;
+        uint64_t total = 0, freeb = 0;
 
         if (!v->mounted) {
             if (flags & CONTENT_DELAYIFSLOW) {
                 LeaveCriticalSection(&g_ext4_cs);
                 return ft_delayed;      /* TC re-asks on its background thread */
             }
-            if (tcl_vol_mount(v) != EOK) {
+            if (tcl_fs_mount(v) != EOK) {
                 LeaveCriticalSection(&g_ext4_cs);
                 return ft_fieldempty;
             }
         }
-        if (ext4_mount_point_stats(v->mp, &st) != EOK) {
+        if (tcl_fs_statfs(v, &total, &freeb) != EOK) {
             LeaveCriticalSection(&g_ext4_cs);
             return ft_fieldempty;
         }
-        freeb = (int64_t)st.free_blocks_count * (int64_t)st.block_size;
         LeaveCriticalSection(&g_ext4_cs);
-        *(int64_t *)FieldValue = freeb;
+        *(int64_t *)FieldValue = (int64_t)freeb;
         return ft_numeric_64;
     }
 
     case FLD_FEATURES:
+        if (v->part.fskind == TCL_FSK_FAT) {
+            LeaveCriticalSection(&g_ext4_cs);
+            return ft_fieldempty;       /* FAT has no feature flags */
+        }
         swprintf_s(buf, _countof(buf), L"c:%08X i:%08X r:%08X",
                    v->part.f_compat, v->part.f_incompat, v->part.f_ro_compat);
         LeaveCriticalSection(&g_ext4_cs);

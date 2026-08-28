@@ -17,6 +17,7 @@
 #include "ext4_inode.h"
 #include "ext4_super.h"
 #include "version.h"
+#include "tcl_fs.h"
 #include <stdio.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -41,6 +42,7 @@ int    __stdcall FsInitW(int, tProgressProcW, tLogProcW, tRequestProcW);
 BOOL   __stdcall FsFindNextW(HANDLE, WIN32_FIND_DATAW *);
 int    __stdcall FsFindClose(HANDLE);
 BOOL   __stdcall FsDeleteFileW(WCHAR *);
+static void      warn_read_only(tcl_volume *v);
 static void      save_images(void);
 
 /* tcl_dialog.c */
@@ -60,8 +62,7 @@ typedef struct {
     fh_kind      kind;
     int          idx;          /* root: index into g_vol, then pseudo entries */
     tcl_volume  *vol;
-    ext4_dir     dir;
-    char         base[512];    /* lwext4 dir path, always ends in '/' */
+    tcl_dirh    *dir;
 } find_handle;
 
 /* ------------------------------------------------------------- helpers */
@@ -91,46 +92,18 @@ static void fill_dir_entry(WIN32_FIND_DATAW *fd, const wchar_t *name,
     fd->ftCreationTime.dwHighDateTime = (DWORD)(ft >> 32);
 }
 
-/*
- * Fill a WIN32_FIND_DATAW from an lwext4 path. Caller holds g_ext4_cs.
- *
- * Symlinks are followed: the row shows the target's type, size and timestamps,
- * so a symlinked directory is enterable and a symlinked file copies its
- * contents rather than the link text. REPARSE_POINT is still set so the panel
- * can distinguish it. A broken or looping link falls back to the link itself.
- */
-static bool stat_into(tcl_volume *v, const char *path, const wchar_t *name,
-                      uint8_t de_type, WIN32_FIND_DATAW *fd)
+static void fill_from_dirent(WIN32_FIND_DATAW *fd, const tcl_dirent *e)
 {
-    struct ext4_inode  ino;
-    struct ext4_sblock *sb = NULL;
-    uint32_t inum = 0;
-    uint64_t size = 0;
-    uint32_t mt = 0, at = 0, ct = 0;
-    char     resolved[768];
-    const char *target = path;
-    bool is_dir  = (de_type == EXT4_DE_DIR);
-    bool is_link = (de_type == EXT4_DE_SYMLINK);
-
-    if (is_link && tcl_realpath(v, path, resolved, sizeof(resolved))) {
-        target = resolved;
-        is_dir = (ext4_inode_exist(resolved, EXT4_DE_DIR) == EOK);
-    }
-
-    if (ext4_raw_inode_fill(target, &inum, &ino) == EOK &&
-        ext4_get_sblock(v->mp, &sb) == EOK) {
-        size = ext4_inode_get_size(sb, &ino);
-        mt   = ext4_inode_get_modif_time(&ino);
-        at   = ext4_inode_get_access_time(&ino);
-        ct   = ext4_inode_get_change_inode_time(&ino);
-    }
-    fill_dir_entry(fd, name, is_dir, size, mt, at, ct, v->read_only);
-    if (is_link)
+    fill_dir_entry(fd, e->name, e->is_dir, e->size, e->mtime, e->atime,
+                   e->ctime, e->read_only);
+    if (e->is_link)
         fd->dwFileAttributes |= FILE_ATTRIBUTE_REPARSE_POINT;
-    return true;
 }
 
-/* Tell the user why a write was refused - once per volume per session. */
+/*
+ * Tell the user why a write was refused - once per volume per session, so a
+ * multi-file copy onto a read-only volume does not produce one dialog per file.
+ */
 static void warn_read_only(tcl_volume *v)
 {
     wchar_t msg[512], dummy[4] = { 0 };
@@ -140,21 +113,15 @@ static void warn_read_only(tcl_volume *v)
     v->ro_warned = true;
 
     swprintf_s(msg, _countof(msg),
-               L"%s is mounted read-only.\r\n\r\nReason: %s\r\n\r\n"
-               L"%s",
+               L"%s is mounted read-only.\r\n\r\nReason: %s\r\n\r\n%s",
                v->part.label,
-               v->part.ro_reason[0] ? v->part.ro_reason : L"backing device could not be opened for writing",
+               v->part.ro_reason[0] ? v->part.ro_reason
+                                    : L"backing device could not be opened for writing",
                (v->part.kind == TCL_SRC_DISK && !tcl_is_elevated())
                    ? L"Total Commander is not running elevated; raw writes to a physical drive need administrator rights."
                    : L"Run e2fsck -f on the volume under Linux to clear this.");
 
     g_request(g_plugin_nr, RT_MsgOK, L"tclwext4", msg, dummy, _countof(dummy));
-}
-
-static void join(char *dst, size_t n, const char *base, const char *leaf)
-{
-    strcpy_s(dst, n, base);
-    strcat_s(dst, n, leaf);
 }
 
 /* ---------------------------------------------------------------- init */
@@ -274,17 +241,13 @@ HANDLE __stdcall FsFindFirstW(WCHAR *Path, WIN32_FIND_DATAW *FindData)
 
     fh->kind = FH_DIR;
     EnterCriticalSection(&g_ext4_cs);
-    fh->vol = tcl_vol_resolve(Path, fh->base, sizeof(fh->base));
-    if (!fh->vol) {
-        LeaveCriticalSection(&g_ext4_cs);
-        LocalFree(fh);
-        SetLastError(ERROR_PATH_NOT_FOUND);
-        return INVALID_HANDLE_VALUE;
+    {
+        const wchar_t *rel;
+        fh->vol = tcl_fs_resolve(Path, &rel);
+        if (fh->vol)
+            fh->dir = tcl_fs_opendir(fh->vol, Path);
     }
-    if (fh->base[strlen(fh->base) - 1] != '/')
-        strcat_s(fh->base, sizeof(fh->base), "/");
-
-    if (ext4_dir_open(&fh->dir, fh->base) != EOK) {
+    if (!fh->vol || !fh->dir) {
         LeaveCriticalSection(&g_ext4_cs);
         LocalFree(fh);
         SetLastError(ERROR_PATH_NOT_FOUND);
@@ -303,7 +266,6 @@ HANDLE __stdcall FsFindFirstW(WCHAR *Path, WIN32_FIND_DATAW *FindData)
 BOOL __stdcall FsFindNextW(HANDLE Hdl, WIN32_FIND_DATAW *FindData)
 {
     find_handle *fh = (find_handle *)Hdl;
-    const ext4_direntry *de;
 
     if (!fh || fh == INVALID_HANDLE_VALUE)
         return FALSE;
@@ -342,34 +304,16 @@ BOOL __stdcall FsFindNextW(HANDLE Hdl, WIN32_FIND_DATAW *FindData)
         return FALSE;
     }
 
-    EnterCriticalSection(&g_ext4_cs);
-    for (;;) {
-        char full[768];
-        wchar_t *wname;
+    {
+        tcl_dirent e;
+        bool ok;
 
-        de = ext4_dir_entry_next(&fh->dir);
-        if (!de) {
-            LeaveCriticalSection(&g_ext4_cs);
-            return FALSE;
-        }
-        if (de->name_length == 1 && de->name[0] == '.')
-            continue;
-        if (de->name_length == 2 && de->name[0] == '.' && de->name[1] == '.')
-            continue;
-
-        {
-            char nm[256];
-            memcpy(nm, de->name, de->name_length);
-            nm[de->name_length] = 0;
-            join(full, sizeof(full), fh->base, nm);
-            wname = tcl_u8_to_w(nm);
-        }
-        if (!wname)
-            continue;
-
-        stat_into(fh->vol, full, wname, de->inode_type, FindData);
-        LocalFree(wname);
+        EnterCriticalSection(&g_ext4_cs);
+        ok = tcl_fs_readdir(fh->dir, &e);
         LeaveCriticalSection(&g_ext4_cs);
+        if (!ok)
+            return FALSE;
+        fill_from_dirent(FindData, &e);
         return TRUE;
     }
 }
@@ -380,9 +324,9 @@ int __stdcall FsFindClose(HANDLE Hdl)
 
     if (!fh || fh == INVALID_HANDLE_VALUE)
         return 0;
-    if (fh->kind == FH_DIR) {
+    if (fh->kind == FH_DIR && fh->dir) {
         EnterCriticalSection(&g_ext4_cs);
-        ext4_dir_close(&fh->dir);
+        tcl_fs_closedir(fh->dir);
         LeaveCriticalSection(&g_ext4_cs);
     }
     LocalFree(fh);
@@ -394,14 +338,15 @@ int __stdcall FsFindClose(HANDLE Hdl)
 int __stdcall FsGetFileW(WCHAR *RemoteName, WCHAR *LocalName, int CopyFlags,
                          RemoteInfoStruct *ri)
 {
-    char path[768];
     tcl_volume *v;
-    ext4_file f;
+    const wchar_t *rel;
+    tcl_file *f;
     HANDLE out;
     uint64_t total, done = 0;
     int rc = FS_FILE_OK;
     BYTE *buf;
-    DWORD created;
+    tcl_dirent st;
+    bool have_st;
 
     (void)ri;
     if (!(CopyFlags & FS_COPYFLAGS_OVERWRITE) &&
@@ -411,20 +356,22 @@ int __stdcall FsGetFileW(WCHAR *RemoteName, WCHAR *LocalName, int CopyFlags,
         return FS_FILE_NOTSUPPORTED;
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteName, path, sizeof(path));
-    if (!v || ext4_fopen(&f, path, "rb") != EOK) {
+    v = tcl_fs_resolve(RemoteName, &rel);
+    f = v ? tcl_fs_fopen(v, RemoteName, false) : NULL;
+    if (!f) {
         LeaveCriticalSection(&g_ext4_cs);
         return FS_FILE_NOTFOUND;
     }
-    total = ext4_fsize(&f);
+    total   = tcl_fs_fsize(f);
+    have_st = (tcl_fs_stat(v, RemoteName, &st) == EOK);
     LeaveCriticalSection(&g_ext4_cs);
 
-    created = (CopyFlags & FS_COPYFLAGS_OVERWRITE) ? CREATE_ALWAYS : CREATE_NEW;
-    out = CreateFileW(LocalName, GENERIC_WRITE, 0, NULL, created,
+    out = CreateFileW(LocalName, GENERIC_WRITE, 0, NULL,
+                      (CopyFlags & FS_COPYFLAGS_OVERWRITE) ? CREATE_ALWAYS : CREATE_NEW,
                       FILE_ATTRIBUTE_NORMAL, NULL);
     if (out == INVALID_HANDLE_VALUE) {
         EnterCriticalSection(&g_ext4_cs);
-        ext4_fclose(&f);
+        tcl_fs_fclose(f);
         LeaveCriticalSection(&g_ext4_cs);
         return FS_FILE_WRITEERROR;
     }
@@ -441,7 +388,7 @@ int __stdcall FsGetFileW(WCHAR *RemoteName, WCHAR *LocalName, int CopyFlags,
         int    r;
 
         EnterCriticalSection(&g_ext4_cs);
-        r = ext4_fread(&f, buf, 1 << 20, &got);
+        r = tcl_fs_fread(f, buf, 1 << 20, &got);
         LeaveCriticalSection(&g_ext4_cs);
         if (r != EOK) { rc = FS_FILE_READERROR; break; }
         if (!got) break;
@@ -458,19 +405,16 @@ int __stdcall FsGetFileW(WCHAR *RemoteName, WCHAR *LocalName, int CopyFlags,
 
     VirtualFree(buf, 0, MEM_RELEASE);
 
-    /* carry mtime over */
-    EnterCriticalSection(&g_ext4_cs);
-    {
-        uint32_t mt = 0;
-        if (ext4_mtime_get(path, &mt) == EOK) {
-            uint64_t ft = tcl_filetime_from_unix(mt);
-            FILETIME w;
-            w.dwLowDateTime  = (DWORD)ft;
-            w.dwHighDateTime = (DWORD)(ft >> 32);
-            SetFileTime(out, NULL, NULL, &w);
-        }
+    if (have_st && st.mtime) {
+        uint64_t ft = tcl_filetime_from_unix(st.mtime);
+        FILETIME w;
+        w.dwLowDateTime  = (DWORD)ft;
+        w.dwHighDateTime = (DWORD)(ft >> 32);
+        SetFileTime(out, NULL, NULL, &w);
     }
-    ext4_fclose(&f);
+
+    EnterCriticalSection(&g_ext4_cs);
+    tcl_fs_fclose(f);
     LeaveCriticalSection(&g_ext4_cs);
     CloseHandle(out);
 
@@ -484,15 +428,16 @@ int __stdcall FsGetFileW(WCHAR *RemoteName, WCHAR *LocalName, int CopyFlags,
 
 int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
 {
-    char path[768];
     tcl_volume *v;
-    ext4_file f;
+    const wchar_t *rel;
+    tcl_file *f;
     HANDLE in;
     LARGE_INTEGER sz;
     uint64_t done = 0;
     int rc = FS_FILE_OK;
     BYTE *buf;
     FILETIME wt;
+    tcl_dirent st;
 
     if (CopyFlags & FS_COPYFLAGS_RESUME)
         return FS_FILE_NOTSUPPORTED;
@@ -505,7 +450,7 @@ int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
     GetFileTime(in, NULL, NULL, &wt);
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteName, path, sizeof(path));
+    v = tcl_fs_resolve(RemoteName, &rel);
     if (!v) {
         LeaveCriticalSection(&g_ext4_cs);
         CloseHandle(in);
@@ -518,17 +463,18 @@ int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
         return FS_FILE_WRITEERROR;
     }
     if (!(CopyFlags & FS_COPYFLAGS_OVERWRITE) &&
-        ext4_inode_exist(path, EXT4_DE_REG_FILE) == EOK) {
+        tcl_fs_stat(v, RemoteName, &st) == EOK) {
         LeaveCriticalSection(&g_ext4_cs);
         CloseHandle(in);
         return FS_FILE_EXISTS;
     }
-    if (ext4_fopen(&f, path, "wb") != EOK) {
+    f = tcl_fs_fopen(v, RemoteName, true);
+    if (!f) {
         LeaveCriticalSection(&g_ext4_cs);
         CloseHandle(in);
         return FS_FILE_WRITEERROR;
     }
-    if (!v->wb_on) {
+    if (v->fs == TCL_FS_EXT && !v->wb_on) {
         ext4_cache_write_back(v->mp, 1);
         v->wb_on = true;
     }
@@ -549,7 +495,7 @@ int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
         if (!got) break;
 
         EnterCriticalSection(&g_ext4_cs);
-        r = ext4_fwrite(&f, buf, got, &put);
+        r = tcl_fs_fwrite(f, buf, got, &put);
         LeaveCriticalSection(&g_ext4_cs);
         if (r != EOK || put != got) { rc = FS_FILE_WRITEERROR; break; }
 
@@ -565,16 +511,15 @@ int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
     CloseHandle(in);
 
     EnterCriticalSection(&g_ext4_cs);
-    ext4_fclose(&f);
-    ext4_mtime_set(path, tcl_unix_from_filetime(&wt));
-    /* Flush per file: a crash then costs one file, not the tree. */
-    if (v->wb_on) {
+    tcl_fs_fclose(f);
+    tcl_fs_set_times(v, RemoteName, NULL, &wt);
+    if (v->fs == TCL_FS_EXT && v->wb_on) {
         ext4_cache_write_back(v->mp, 0);
         v->wb_on = false;
     }
-    ext4_cache_flush(v->mp);
+    tcl_fs_flush(v);
     if (rc != FS_FILE_OK && rc != FS_FILE_USERABORT)
-        ext4_fremove(path);
+        tcl_fs_unlink(v, RemoteName);
     LeaveCriticalSection(&g_ext4_cs);
 
     if (rc == FS_FILE_OK && (CopyFlags & FS_COPYFLAGS_MOVE))
@@ -585,35 +530,43 @@ int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
 
 /* -------------------------------------------------------- modifications */
 
+static tcl_volume *writable_vol(const wchar_t *path)
+{
+    const wchar_t *rel;
+    tcl_volume *v = tcl_fs_resolve(path, &rel);
+
+    if (!v)
+        return NULL;
+    if (v->read_only) {
+        warn_read_only(v);
+        return NULL;
+    }
+    return v;
+}
+
 BOOL __stdcall FsMkDirW(WCHAR *Path)
 {
-    char p[768];
     tcl_volume *v;
     BOOL ok = FALSE;
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(Path, p, sizeof(p));
-    if (v && v->read_only)
-        warn_read_only(v);
-    else if (v)
-        ok = (ext4_dir_mk(p) == EOK);
+    v = writable_vol(Path);
+    if (v)
+        ok = (tcl_fs_mkdir(v, Path) == EOK);
     LeaveCriticalSection(&g_ext4_cs);
     return ok;
 }
 
 BOOL __stdcall FsDeleteFileW(WCHAR *RemoteName)
 {
-    char p[768];
     tcl_volume *v;
     BOOL ok = FALSE;
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteName, p, sizeof(p));
-    if (v && v->read_only) {
-        warn_read_only(v);
-    } else if (v) {
-        ok = (ext4_fremove(p) == EOK);
-        ext4_cache_flush(v->mp);
+    v = writable_vol(RemoteName);
+    if (v) {
+        ok = (tcl_fs_unlink(v, RemoteName) == EOK);
+        tcl_fs_flush(v);
     }
     LeaveCriticalSection(&g_ext4_cs);
     return ok;
@@ -621,17 +574,14 @@ BOOL __stdcall FsDeleteFileW(WCHAR *RemoteName)
 
 BOOL __stdcall FsRemoveDirW(WCHAR *RemoteName)
 {
-    char p[768];
     tcl_volume *v;
     BOOL ok = FALSE;
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteName, p, sizeof(p));
-    if (v && v->read_only) {
-        warn_read_only(v);
-    } else if (v) {
-        ok = (ext4_dir_rm(p) == EOK);
-        ext4_cache_flush(v->mp);
+    v = writable_vol(RemoteName);
+    if (v) {
+        ok = (tcl_fs_rmdir(v, RemoteName) == EOK);
+        tcl_fs_flush(v);
     }
     LeaveCriticalSection(&g_ext4_cs);
     return ok;
@@ -640,39 +590,42 @@ BOOL __stdcall FsRemoveDirW(WCHAR *RemoteName)
 int __stdcall FsRenMovFileW(WCHAR *OldName, WCHAR *NewName, BOOL Move,
                             BOOL OverWrite, RemoteInfoStruct *ri)
 {
-    char op[768], np[768];
     tcl_volume *vo, *vn;
+    const wchar_t *r1, *r2;
+    tcl_dirent st;
     int rc = FS_FILE_WRITEERROR;
 
     (void)ri;
     EnterCriticalSection(&g_ext4_cs);
-    vo = tcl_vol_resolve(OldName, op, sizeof(op));
-    vn = tcl_vol_resolve(NewName, np, sizeof(np));
+    vo = tcl_fs_resolve(OldName, &r1);
+    vn = tcl_fs_resolve(NewName, &r2);
     if (!vo || !vn) {
         LeaveCriticalSection(&g_ext4_cs);
         return FS_FILE_NOTFOUND;
     }
+    /* Also covers ext<->FAT moves inside one image: TC falls back to
+       copy+delete, which goes through the abstraction correctly. */
     if (vo != vn) {
         LeaveCriticalSection(&g_ext4_cs);
-        return FS_FILE_NOTSUPPORTED;   /* TC falls back to copy+delete */
+        return FS_FILE_NOTSUPPORTED;
     }
     if (vo->read_only) {
         warn_read_only(vo);
         LeaveCriticalSection(&g_ext4_cs);
         return FS_FILE_WRITEERROR;
     }
-    if (!OverWrite && ext4_inode_exist(np, EXT4_DE_REG_FILE) == EOK) {
+    if (!OverWrite && tcl_fs_stat(vn, NewName, &st) == EOK) {
         LeaveCriticalSection(&g_ext4_cs);
         return FS_FILE_EXISTS;
     }
     if (!Move) {
         LeaveCriticalSection(&g_ext4_cs);
-        return FS_FILE_NOTSUPPORTED;   /* pure copy: let TC do get+put */
+        return FS_FILE_NOTSUPPORTED;
     }
     if (OverWrite)
-        ext4_fremove(np);
-    if (ext4_frename(op, np) == EOK) {
-        ext4_cache_flush(vo->mp);
+        tcl_fs_unlink(vn, NewName);
+    if (tcl_fs_rename(vo, OldName, NewName) == EOK) {
+        tcl_fs_flush(vo);
         rc = FS_FILE_OK;
     }
     LeaveCriticalSection(&g_ext4_cs);
@@ -680,75 +633,46 @@ int __stdcall FsRenMovFileW(WCHAR *OldName, WCHAR *NewName, BOOL Move,
 }
 
 /*
- * TC's "Change attributes" dialog routes here.
- *
- * CreationTime is deliberately ignored. ext4's ctime is the inode CHANGE time,
- * not a creation time - it is maintained by the filesystem whenever metadata
- * changes, and POSIX has no interface to set it. (ext4 does store a real birth
- * time in the 256-byte inode's extra fields, but lwext4 exposes no accessor.)
- * Writing the user's "created" value into ctime would put a wrong number into a
- * field Linux tools read for something else entirely, so we skip it and still
- * report success as long as the fields ext4 can represent were set.
- *
- * Note that tcl_vol_resolve() follows symlinks, so timestamps land on the
- * target, matching utimes() rather than lutimes().
+ * CreationTime is ignored on both filesystems. ext4's ctime is the inode
+ * CHANGE time, which POSIX gives no way to set; FAT's creation stamp exists but
+ * FatFs's f_utime only writes the modification stamp. Access time is likewise
+ * dropped on FAT, where it is an optional date-only field.
  */
 BOOL __stdcall FsSetTimeW(WCHAR *RemoteName, FILETIME *CreationTime,
                           FILETIME *LastAccessTime, FILETIME *LastWriteTime)
 {
-    char p[768];
     tcl_volume *v;
     BOOL ok = FALSE;
 
     (void)CreationTime;
-
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteName, p, sizeof(p));
-    if (v && v->read_only) {
-        warn_read_only(v);
-    } else if (v) {
-        ok = TRUE;
-        /* mtime last: lwext4 touches ctime as a side effect of these, so the
-           inode ends up with a change time that reflects this operation. */
-        if (LastAccessTime)
-            ok &= (ext4_atime_set(p, tcl_unix_from_filetime(LastAccessTime)) == EOK);
-        if (LastWriteTime)
-            ok &= (ext4_mtime_set(p, tcl_unix_from_filetime(LastWriteTime)) == EOK);
+    v = writable_vol(RemoteName);
+    if (v) {
+        ok = (tcl_fs_set_times(v, RemoteName, LastAccessTime, LastWriteTime) == EOK);
         if (ok)
-            ext4_cache_flush(v->mp);
+            tcl_fs_flush(v);
     }
     LeaveCriticalSection(&g_ext4_cs);
     return ok;
 }
 
 /*
- * Only the read-only bit maps onto anything in ext4. Windows' hidden, system
- * and archive bits have no equivalent and are silently ignored rather than
- * being invented as xattrs.
- *
- * Clearing read-only restores the owner write bit only. The original group and
- * other write bits are not recoverable once cleared, so we do not guess at
- * them; use chmod under Linux if the exact mode matters.
+ * Only the read-only bit maps onto both filesystems - to the mode's write bits
+ * on ext4, to AM_RDO on FAT. Hidden, system and archive exist on FAT but not
+ * ext4, and are ignored rather than being handled on one filesystem only.
  */
 BOOL __stdcall FsSetAttrW(WCHAR *RemoteName, int NewAttr)
 {
-    char p[768];
     tcl_volume *v;
-    uint32_t mode = 0;
     BOOL ok = FALSE;
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteName, p, sizeof(p));
-    if (v && v->read_only) {
-        warn_read_only(v);
-    } else if (v && ext4_mode_get(p, &mode) == EOK) {
-        if (NewAttr & FILE_ATTRIBUTE_READONLY)
-            mode &= ~0222u;
-        else
-            mode |= 0200u;
-        ok = (ext4_mode_set(p, mode) == EOK);
+    v = writable_vol(RemoteName);
+    if (v) {
+        ok = (tcl_fs_set_readonly(v, RemoteName,
+                                  (NewAttr & FILE_ATTRIBUTE_READONLY) != 0) == EOK);
         if (ok)
-            ext4_cache_flush(v->mp);
+            tcl_fs_flush(v);
     }
     LeaveCriticalSection(&g_ext4_cs);
     return ok;
@@ -758,7 +682,7 @@ BOOL __stdcall FsSetAttrW(WCHAR *RemoteName, int NewAttr)
 
 void __stdcall FsStatusInfoW(WCHAR *RemoteDir, int InfoStartEnd, int InfoOperation)
 {
-    char p[768];
+    const wchar_t *rel;
     tcl_volume *v;
 
     if (InfoOperation != FS_STATUS_OP_PUT_MULTI &&
@@ -767,15 +691,15 @@ void __stdcall FsStatusInfoW(WCHAR *RemoteDir, int InfoStartEnd, int InfoOperati
         return;
 
     EnterCriticalSection(&g_ext4_cs);
-    v = tcl_vol_resolve(RemoteDir, p, sizeof(p));
-    if (v && !v->read_only) {
+    v = tcl_fs_resolve(RemoteDir, &rel);
+    if (v && v->fs == TCL_FS_EXT && !v->read_only) {
         if (InfoStartEnd == FS_STATUS_START && !v->wb_on) {
             ext4_cache_write_back(v->mp, 1);
             v->wb_on = true;
         } else if (InfoStartEnd == FS_STATUS_END && v->wb_on) {
             ext4_cache_write_back(v->mp, 0);
             v->wb_on = false;
-            ext4_cache_flush(v->mp);
+            tcl_fs_flush(v);
         }
     }
     LeaveCriticalSection(&g_ext4_cs);
@@ -795,7 +719,22 @@ BOOL __stdcall FsDisconnectW(WCHAR *DisconnectRoot)
  * per-volume actions hang off the "properties" verb (Alt+Enter / right-click >
  * Properties) and the global ones off pseudo-files in the root listing.
  */
-static int volume_properties(HWND MainWin, tcl_volume *v)
+/*
+ * Ask Total Commander to re-read the root listing.
+ *
+ * FS_EXEC_OK just means "handled" - TC keeps showing the panel it already has,
+ * which is why a newly added image only appeared after leaving and re-entering
+ * the plugin. FS_EXEC_SYMLINK means "RemoteName now holds a directory to change
+ * to", and navigating to the root forces a fresh FsFindFirstW.
+ */
+static int refresh_root(WCHAR *RemoteName)
+{
+    if (RemoteName)
+        wcscpy_s(RemoteName, MAX_PATH, L"\\");
+    return FS_EXEC_SYMLINK;
+}
+
+static int volume_properties(HWND MainWin, WCHAR *RemoteName, tcl_volume *v)
 {
     wchar_t msg[1024], answer[8] = { 0 };
     wchar_t size[64];
@@ -843,7 +782,7 @@ static int volume_properties(HWND MainWin, tcl_volume *v)
             if (_wcsicmp(g_images[i], v->part.backing) == 0) { sel = i; break; }
         g_request(g_plugin_nr, RT_MsgOK, L"tclwext4", msg, answer, _countof(answer));
         tcl_manage_images(MainWin, sel);
-        return FS_EXEC_OK;
+        return refresh_root(RemoteName);
     }
 
     if (!v->mounted) {
@@ -857,7 +796,7 @@ static int volume_properties(HWND MainWin, tcl_volume *v)
     EnterCriticalSection(&g_ext4_cs);
     tcl_vol_unmount(v);
     LeaveCriticalSection(&g_ext4_cs);
-    return FS_EXEC_OK;
+    return refresh_root(RemoteName);
 }
 
 int __stdcall FsExecuteFileW(HWND MainWin, WCHAR *RemoteName, WCHAR *Verb)
@@ -872,7 +811,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR *RemoteName, WCHAR *Verb)
         v = tcl_vol_find(leaf);
         LeaveCriticalSection(&g_ext4_cs);
         if (v)
-            return volume_properties(MainWin, v);
+            return volume_properties(MainWin, RemoteName, v);
         return FS_EXEC_YOURSELF;
     }
 
@@ -883,12 +822,12 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR *RemoteName, WCHAR *Verb)
         EnterCriticalSection(&g_ext4_cs);
         tcl_vol_rescan();
         LeaveCriticalSection(&g_ext4_cs);
-        return FS_EXEC_OK;
+        return refresh_root(RemoteName);
     }
 
     if (_wcsicmp(leaf, PSEUDO_MANAGE) == 0) {
         tcl_manage_images(MainWin, -1);
-        return FS_EXEC_OK;
+        return refresh_root(RemoteName);
     }
 
     /*
@@ -914,7 +853,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR *RemoteName, WCHAR *Verb)
 
         tcl_remove_all_images();
         tcl_logf(L"tclwext4: all disk images unmounted and removed from the list");
-        return FS_EXEC_OK;
+        return refresh_root(RemoteName);
     }
 
     if (_wcsicmp(leaf, PSEUDO_ADDIMG) == 0) {
@@ -935,7 +874,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR *RemoteName, WCHAR *Verb)
             tcl_vol_rescan();
             LeaveCriticalSection(&g_ext4_cs);
         }
-        return FS_EXEC_OK;
+        return refresh_root(RemoteName);
     }
 
     return FS_EXEC_YOURSELF;

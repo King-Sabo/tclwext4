@@ -55,7 +55,7 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <LanguageStandard_C>stdc11</LanguageStandard_C>
-      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)config;$(ProjectDir)external\lwext4\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)config;$(ProjectDir)external\lwext4\include;$(SolutionDir)build\fatfs;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!--
         lwext4 configuration lives in config/generated/ext4_config.h, which
         lwext4's own ext4_config.h includes. Do not add CONFIG_* defines here:
@@ -94,6 +94,8 @@
     <ClCompile Include="src\tcl_util.c" />
     <ClCompile Include="src\tcl_content.c" />
     <ClCompile Include="src\tcl_dialog.c" />
+    <ClCompile Include="src\tcl_fs.c" />
+    <ClCompile Include="src\tcl_fs_fat.c" />
   </ItemGroup>
 
   <ItemGroup>
@@ -103,6 +105,7 @@
   <ItemGroup>
     <ClInclude Include="src\tclwext4.h" />
     <ClInclude Include="src\version.h" />
+    <ClInclude Include="src\tcl_fs.h" />
     <ClInclude Include="src\wfxplugin.h" />
   </ItemGroup>
 
@@ -114,6 +117,9 @@
   <ItemGroup>
     <ProjectReference Include="lwext4.vcxproj">
       <Project>{6B2F8C1A-9D3E-4A57-8B21-0C4E7F9A1D33}</Project>
+    </ProjectReference>
+    <ProjectReference Include="fatfs.vcxproj">
+      <Project>{C41B7E92-3A5D-4E18-9F62-7D0A5C38B441}</Project>
     </ProjectReference>
   </ItemGroup>
 

@@ -10,6 +10,7 @@
  *   - the user set readonly=1 in the ini
  */
 #include "tclwext4.h"
+#include "tcl_fs.h"
 #include <stdio.h>
 
 tcl_volume       g_vol[TCL_MAX_VOLUMES];
@@ -36,8 +37,10 @@ void tcl_vol_rescan(void)
 
     ZeroMemory(g_vol, sizeof(g_vol));
     for (i = 0; i < n; i++) {
-        g_vol[i].in_use = true;
-        g_vol[i].part   = parts[i];
+        g_vol[i].in_use   = true;
+        g_vol[i].part     = parts[i];
+        g_vol[i].fs       = (parts[i].fskind == TCL_FSK_FAT) ? TCL_FS_FAT : TCL_FS_EXT;
+        g_vol[i].fat_pdrv = -1;
         _snprintf_s(g_vol[i].dev_name, sizeof(g_vol[i].dev_name), _TRUNCATE,
                     "bd%d", i);
         {
@@ -51,7 +54,7 @@ void tcl_vol_rescan(void)
     tcl_logf(L"tclwext4: %d ext volume(s) found", n);
 }
 
-int tcl_vol_mount(tcl_volume *v)
+int tcl_ext_mount(tcl_volume *v)
 {
     bool want_write;
     int  r;
@@ -107,7 +110,7 @@ int tcl_vol_mount(tcl_volume *v)
     return EOK;
 }
 
-void tcl_vol_unmount(tcl_volume *v)
+void tcl_ext_unmount(tcl_volume *v)
 {
     if (!v->mounted)
         return;
@@ -125,6 +128,16 @@ void tcl_vol_unmount(tcl_volume *v)
     ext4_device_unregister(v->dev_name);
     tcl_bdev_close(&v->bdev);
     v->mounted = false;
+}
+
+int tcl_vol_mount(tcl_volume *v)
+{
+    return tcl_fs_mount(v);
+}
+
+void tcl_vol_unmount(tcl_volume *v)
+{
+    tcl_fs_unmount(v);
 }
 
 void tcl_vol_unmount_all(void)
@@ -226,53 +239,5 @@ bool tcl_realpath(tcl_volume *v, const char *in, char *out, size_t outsz)
     return true;
 }
 
-tcl_volume *tcl_vol_resolve(const wchar_t *tc_path, char *out, size_t outsz)
-{
-    wchar_t vol[64];
-    const wchar_t *p = tc_path, *slash;
-    tcl_volume *v;
-    char *u8;
-    size_t i;
-
-    if (*p == L'\\')
-        p++;
-    slash = wcschr(p, L'\\');
-    if (slash) {
-        size_t len = (size_t)(slash - p);
-        if (len >= _countof(vol))
-            return NULL;
-        wmemcpy(vol, p, len);
-        vol[len] = 0;
-    } else {
-        wcsncpy_s(vol, _countof(vol), p, _TRUNCATE);
-    }
-    if (!vol[0])
-        return NULL;
-
-    v = tcl_vol_find(vol);
-    if (!v)
-        return NULL;
-    if (tcl_vol_mount(v) != EOK)
-        return NULL;
-
-    /* mount point already ends in '/', append the remainder with '/' seps */
-    strcpy_s(out, outsz, v->mp);
-    if (slash && slash[1]) {
-        u8 = tcl_w_to_u8(slash + 1);
-        if (!u8)
-            return NULL;
-        for (i = 0; u8[i]; i++)
-            if (u8[i] == '\\') u8[i] = '/';
-        strcat_s(out, outsz, u8);
-        LocalFree(u8);
-    }
-
-    {
-        char resolved[768];
-        if (tcl_realpath(v, out, resolved, sizeof(resolved)))
-            strcpy_s(out, outsz, resolved);
-        /* On failure 'out' keeps the unresolved path: a broken link should
-           surface as ENOENT from lwext4, not as a silent wrong target. */
-    }
-    return v;
-}
+/* tcl_vol_resolve() was replaced by tcl_fs_resolve() in tcl_fs.c, which
+   returns the volume-relative tail and lets each backend build its own path. */

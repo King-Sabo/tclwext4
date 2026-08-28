@@ -44,6 +44,26 @@ If the BSD-only subset ever matters to you, it is `CONFIG_EXT_FEATURE_SET_LVL 2`
 (ext2, no extents, no xattr) — a genuinely different and much less useful
 product.
 
+## FatFs
+
+Upstream: http://elm-chan.org/fsw/ff/ (vendored unmodified as a submodule at
+`external/fatfs`, via the https://github.com/abbrev/fatfs mirror)
+
+FatFs is **BSD-1-Clause** (the "FatFs License"): a single condition requiring the
+copyright notice to be retained in source redistributions. It is GPL-compatible
+and adds no obligation beyond what lwext4 already imposes, so tclwext4 as a whole
+remains GPL-2.0-or-later.
+
+`config/ffconf.h` is derived from upstream's `ffconf.h` and carries FatFs's
+license, not the GPL.
+
+Note that FatFs was chosen over [fat_io_lib](https://github.com/ultraembedded/fat_io_lib)
+partly on licensing grounds: fat_io_lib ships a GPLv3 `LICENSE` file while every
+source header states GPLv2-or-later, an ambiguity that would have had to be
+resolved before it could be combined with lwext4's GPL-2.0-or-later code. It also
+keeps its filesystem state in a single global, so only one FAT volume could be
+mounted at a time.
+
 ## Total Commander plugin interface
 
 `src/wfxplugin.h` was written against Ghisler's publicly documented WFX API. It

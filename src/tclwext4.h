@@ -63,6 +63,14 @@ typedef enum {
     TCL_SRC_IMAGE       /* raw disk image with MBR/GPT */
 } tcl_src_kind;
 
+/* Which filesystem the scanner found in this partition. Declared here rather
+   than in tcl_fs.h so tcl_part can carry it out of the scan. */
+typedef enum {
+    TCL_FSK_NONE = 0,
+    TCL_FSK_EXT,
+    TCL_FSK_FAT
+} tcl_fs_kind_e;
+
 typedef struct {
     wchar_t   backing[MAX_PATH];   /* \\.\PhysicalDrive1 or D:\sd.img */
     wchar_t   label[64];           /* TC directory name, filename-safe */
@@ -74,6 +82,7 @@ typedef struct {
     uint64_t  size;                /* bytes */
     uint32_t  sector;              /* bytes per sector of backing store */
 
+    tcl_fs_kind_e fskind;
     uint32_t  f_compat, f_incompat, f_ro_compat;
     uint32_t  incompat_unsup, ro_unsup;
     bool      mountable;           /* false: unsupported INCOMPAT bits */
@@ -90,11 +99,16 @@ int  tcl_scan_all(tcl_part *out, int max, const wchar_t images[][MAX_PATH], int 
 /* Probe a candidate range for an ext superblock and fill feature info. */
 bool tcl_probe_ext(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_part *p);
 
+/* Probe for a FAT12/16/32 BPB. Images only - see tcl_scan.c for why. */
+bool tcl_probe_fat(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_part *p);
+
 /* -------------------------------------------------------------- volume */
 
 typedef struct {
     bool      in_use;
     bool      mounted;
+    int       fs;            /* tcl_fs_kind from tcl_fs.h */
+    int       fat_pdrv;      /* FatFs drive slot, -1 when not FAT */
     tcl_part  part;
     tcl_bdev  bdev;
     char      dev_name[64];   /* lwext4 device name  */
@@ -115,18 +129,9 @@ void tcl_vol_unmount_all(void);
 tcl_volume *tcl_vol_find(const wchar_t *name);
 
 /*
- * Split a TC path (\Disk0p2\dir\file) into a volume and an lwext4 path
- * ("/disk0p2/dir/file"). Mounts the volume on demand.
- * Returns NULL if the first component is not a known volume.
- */
-tcl_volume *tcl_vol_resolve(const wchar_t *tc_path, char *out, size_t outsz);
-
-/*
  * Resolve every component of an lwext4 path, following symlinks (depth-capped,
- * so loops terminate). 'in' and 'out' are lwext4 paths including the mount
- * point. Returns false if a link is broken or the chain is too deep, in which
- * case 'out' holds the unresolved path and the caller should treat the entry
- * as the link itself.
+ * so loops terminate). Returns false if a link is broken or the chain is too
+ * deep, leaving 'out' holding the unresolved path.
  */
 #define TCL_SYMLINK_MAX 8
 bool tcl_realpath(tcl_volume *v, const char *in, char *out, size_t outsz);

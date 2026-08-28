@@ -1,7 +1,8 @@
 # tclwext4
 
 Total Commander WFX file system plugin giving read/write access to ext2/ext3/ext4
-volumes from Windows, backed by an unmodified [lwext4](https://github.com/gkostka/lwext4).
+volumes from Windows, backed by an unmodified [lwext4](https://github.com/gkostka/lwext4),
+plus FAT12/16/32 inside disk images via [FatFs](http://elm-chan.org/fsw/ff/).
 
 ---
 
@@ -187,6 +188,39 @@ partition table (mkfs straight onto a USB stick).
 Raw disk images added through `[add image...]` are parsed here instead: GPT
 first, then MBR plus logical partitions, and if neither is present the whole
 file is treated as one dd-style partition image.
+
+## FAT support
+
+Images containing both an ESP and a root filesystem — the usual UEFI layout —
+show both partitions as separate volumes, so you can edit `grub.cfg` or drop in
+a `.efi` binary without leaving the panel.
+
+**FAT is recognised in images only.** On a physical disk Windows mounts FAT
+itself and caches the same sectors, and nothing arbitrates between its cache and
+ours; two writers with independent caches corrupt a filesystem quickly and
+quietly. An image file has no second writer, so the hazard does not exist there.
+`tcl_scan.c` enforces this: `tcl_probe_fat()` is only called for
+`TCL_SRC_IMAGE` partitions. ext partitions are still found everywhere, since
+Windows has no ext driver to conflict with.
+
+Detection is deliberately strict — jump instruction, boot signature, power-of-two
+cluster size, sane FAT and root-directory geometry, and a cluster count that
+actually fits the partition. A loose check would claim partitions that merely
+look plausible, and this plugin writes to what it claims.
+
+### What differs from ext on FAT volumes
+
+| | ext | FAT |
+|---|---|---|
+| Symlinks | followed | none exist |
+| Permissions | mode bits | read-only attribute only |
+| Timestamps | atime/mtime/ctime, UTC | one write stamp, local time, 2-second resolution |
+| Feature gate | superblock flags | not applicable |
+| Free space | superblock counters | `f_getfree` (walks the FAT on first call) |
+
+FAT stores wall-clock local time with no timezone, so every conversion goes
+through the local-time API. A timestamp written in one timezone reads back
+differently in another — that is FAT's behaviour, not a bug here.
 
 ## Read-only policy
 
