@@ -1,8 +1,14 @@
 # tclwext4
 
-Total Commander WFX file system plugin giving read/write access to ext2/ext3/ext4
-volumes from Windows, backed by an unmodified [lwext4](https://github.com/gkostka/lwext4),
-plus FAT12/16/32 inside disk images via [FatFs](http://elm-chan.org/fsw/ff/).
+Total Commander WFX file system plugin giving read/write access from Windows to
+ext2/ext3/ext4 volumes on disks, USB sticks and images, and to FAT12/16/32
+partitions inside images.
+
+Two unmodified upstream libraries do the filesystem work:
+[lwext4](https://github.com/gkostka/lwext4) for ext, and
+[FatFs](http://elm-chan.org/fsw/ff/) for FAT. Both are vendored as submodules
+and neither is patched; a small abstraction in `src/tcl_fs.c` puts them behind
+one API so the Total Commander plumbing is written once.
 
 ---
 
@@ -61,17 +67,26 @@ passthrough, two writers will destroy the filesystem and neither will notice.
 its own volume cache for any other partition on the same disk, and removable
 media can be pulled at any moment.
 
+**FatFs is mature, but FAT is unforgiving.** FatFs itself is the most exercised
+small FAT implementation there is, and the risk profile is genuinely lower than
+lwext4's. What it lacks is any journalling at all — FAT has none to have. An
+interrupted write leaves a half-updated FAT and directory entry with no replay
+mechanism, and with `FF_VOLUMES` allowing several mounts at once, an abort can
+leave more than one volume in that state. Cross-linked clusters and lost chains
+are what `chkdsk` or `fsck.fat` exist to clean up afterwards.
+
 **This plugin is new and lightly tested.** The scanner, the block device shim,
 the path resolution and the symlink following are all recent code.
 
 ### Reducing the risk
 
 - Prefer image files (`[add image...]`) over live devices; a corrupted image is
-  a deleted file, not a lost disk.
+  a deleted file, not a lost disk. FAT is only ever touched inside images.
 - Keep `readonly=1` in the ini unless you specifically need to write.
 - Unmount cleanly: use `FsDisconnect` (TC's disconnect) rather than closing TC
   or pulling the stick, so caches flush and the journal stops.
-- Run `e2fsck -f` on the volume after writing, before trusting it.
+- Run `e2fsck -f` (ext) or `fsck.fat -n` / `chkdsk` (FAT) after writing, before
+  trusting the result.
 - Never write to a filesystem that is mounted anywhere else at the same time.
 
 ---
@@ -103,8 +118,8 @@ GitHub login to download, are unsigned, and are named
 them as build logs that happen to contain a DLL.
 
 The workflow also runs a `submodule bootstrap` job that checks out *without*
-submodules on purpose, to prove the `FetchLwext4` target in `lwext4.vcxproj`
-still works. That path once produced an empty static library rather than an
+submodules on purpose, to prove the `FetchLwext4` and `FetchFatFs` targets still
+work. That path once produced an empty static library rather than an
 error, so it gets its own job instead of being assumed correct.
 
 **Licensing is not the reason.** The GPL places no obstacle in the way of binary
@@ -112,16 +127,25 @@ releases — publishing the source is already distribution, and attaching a bina
 to a release next to complete corresponding source satisfies it cleanly. Anyone
 forking this and choosing to ship binaries is free to do so under GPLv2 terms.
 One trap if you do: GitHub's auto-generated "Source code (zip)" on a release
-**omits submodule contents**, so `external/lwext4` arrives empty and the archive
-is not complete corresponding source. Attach an archive built with
+**omits submodule contents**, so `external/lwext4` and `external/fatfs` arrive
+empty and the archive is not complete corresponding source. Attach an archive built with
 `git-archive-all` or an equivalent instead.
 
 ## Build
 
+There are two submodules:
+
+| Path | Upstream | Provides |
+|---|---|---|
+| `external/lwext4` | [gkostka/lwext4](https://github.com/gkostka/lwext4) | ext2/3/4 |
+| `external/fatfs` | [FatFs](http://elm-chan.org/fsw/ff/), via the [abbrev/fatfs](https://github.com/abbrev/fatfs) mirror | FAT12/16/32, exFAT |
+
 `git submodule update --init --recursive` runs automatically as a pre-build step
-if `external/lwext4` is empty, so a fresh clone builds without setup. It needs
-`git` on PATH and a real git working copy; for a plain source download, clone
-lwext4 into `external/lwext4` by hand.
+when either is empty, so a fresh clone builds without setup — `FetchLwext4` in
+`lwext4.vcxproj` and `FetchFatFs` in `fatfs.vcxproj`, and the equivalent at
+configure time under CMake. Each falls back to a direct `git clone` if the
+submodule update is a no-op, which happens when `.gitmodules` lists a path with
+no gitlink in the index. Both need `git` on PATH.
 
 Open `tclwext4.sln` in Visual Studio 2022 and build Release for x64 and Win32,
 or from a developer prompt:
@@ -141,9 +165,10 @@ cmake --preset vs2022-x86 && cmake --build --preset x86-release
 Produces `tclwext4.wfx64` and `tclwext4.wfx`. Put both in one directory and
 point Total Commander at either; TC picks the matching bitness itself.
 
-Both build systems compile `external/lwext4/src/*.c` into a separate static lib
-target rather than using lwext4's own build files. The submodule is never
-patched.
+Both submodules are compiled into their own static library targets rather than
+via their upstream build files, and **neither submodule is ever patched**. How
+each is configured differs, and the difference is worth knowing before touching
+either.
 
 ### lwext4 configuration
 
@@ -173,7 +198,45 @@ corruption at runtime.
 MSBuild expands wildcards during project *evaluation*, before any target runs, so
 on a fresh clone a glob would resolve to nothing and the pre-build fetch would
 land too late to affect that same build. Re-sync the list against
-`external/lwext4/src/*.c` on a submodule bump. The `CONFIG_*` list is duplicated in both `.vcxproj` files and must stay
+`external/lwext4/src/*.c` on a submodule bump.
+
+### FatFs configuration
+
+FatFs cannot be configured the same way, and the difference forces a different
+arrangement. Its knobs are plain `#define`s in `ffconf.h` with no `#ifndef`
+guards, and `ff.h` pulls that file in with a quoted include — which MSVC
+resolves against `ff.h`'s own directory before any `/I` path. So there is no way
+to override it from the command line.
+
+Instead, the build **stages FatFs into the build tree**: `ff.c`, `ff.h`,
+`ffunicode.c`, `ffsystem.c` and `diskio.h` are copied to `build/fatfs/`, and
+**`config/ffconf.h`** is dropped in beside them so the quoted include resolves
+to ours. `external/fatfs` stays pristine. This is `StageFatFs` in
+`fatfs.vcxproj` and `configure_file(... COPYONLY)` under CMake.
+
+Settings changed from upstream, all of which matter:
+
+| Setting | Value | Why |
+|---|---|---|
+| `FF_USE_LFN` | 3 | long filenames; an ESP is full of them |
+| `FF_LFN_UNICODE` | 1 | UTF-16, matching the WFX W-API. **1 is UTF-16, 2 is UTF-8** — with 2, `ff.h` typedefs `TCHAR` as `char` and collides with `windows.h` |
+| `FF_USE_CHMOD` | 1 | `f_chmod` / `f_utime`; without it they are compiled out and fail at *link* time |
+| `FF_VOLUMES` | 10 | one slot per mountable FAT partition |
+| `FF_MAX_SS` | 4096 | 4Kn images |
+| `FF_LBA64` | 1 | images past 2 TiB |
+| `FF_CODE_PAGE` | 437 | upstream default is 932 (Japanese) |
+| `FF_FS_EXFAT` | 1 | occasionally used for large data partitions |
+
+Two traps worth remembering. **`UNICODE` must be defined when compiling FatFs**
+— `ff.h` includes `windows.h` itself on `_WIN32`, and without `UNICODE` that
+gives `TCHAR` as `char` while FatFs uses `WCHAR`, so the two disagree. And
+FatFs's defaults are minimal-footprint: **disabled functions vanish silently at
+compile time**, so anything new in `tcl_fs.c` that calls an `f_*` function
+deserves a glance at its `#if` guard before you find out from the linker.
+
+### Shared-header hazard
+
+The `CONFIG_*` list is duplicated in both lwext4 `.vcxproj` files and must stay
 identical: these headers are shared, and a mismatch in e.g.
 `CONFIG_EXT4_MAX_MP_NAME` silently changes struct layouts between the two.
 
@@ -202,6 +265,10 @@ quietly. An image file has no second writer, so the hazard does not exist there.
 `tcl_scan.c` enforces this: `tcl_probe_fat()` is only called for
 `TCL_SRC_IMAGE` partitions. ext partitions are still found everywhere, since
 Windows has no ext driver to conflict with.
+
+Every partition considered during a scan is logged, with the reason when a
+partition is rejected — sector size, cluster geometry, missing signature and so
+on. If a FAT partition does not appear, that log line says which check failed.
 
 Detection is deliberately strict — jump instruction, boot signature, power-of-two
 cluster size, sane FAT and root-directory geometry, and a cluster count that
@@ -382,6 +449,9 @@ Drop the prerelease flag when the plugin stops being one.
 and two of the files this plugin links (`ext4_extent.c`, `ext4_xattr.c`) are
 GPL-2.0-or-later while the rest is BSD-3-Clause. `ext4_extent.c` cannot be
 dropped: extents are how every modern ext4 filesystem stores its block map.
+
+FatFs is BSD-1-Clause and adds no obligation of its own; it was chosen over
+fat_io_lib partly for that reason. Only its copyright notice must be retained.
 
 The obligation attaches on **distribution**, not on use. Internal use triggers
 nothing; shipping a binary means shipping complete corresponding source for the
