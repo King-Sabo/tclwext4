@@ -39,8 +39,10 @@ void tcl_vol_rescan(void)
     for (i = 0; i < n; i++) {
         g_vol[i].in_use   = true;
         g_vol[i].part     = parts[i];
-        g_vol[i].fs       = (parts[i].fskind == TCL_FSK_FAT) ? TCL_FS_FAT : TCL_FS_EXT;
-        g_vol[i].fat_pdrv = -1;
+        g_vol[i].fs       = (parts[i].fskind == TCL_FSK_FAT)  ? TCL_FS_FAT :
+                            (parts[i].fskind == TCL_FSK_SQFS) ? TCL_FS_SQFS : TCL_FS_EXT;
+        g_vol[i].fat_pdrv  = -1;
+        g_vol[i].sqfs_slot = -1;
         _snprintf_s(g_vol[i].dev_name, sizeof(g_vol[i].dev_name), _TRUNCATE,
                     "bd%d", i);
         {
@@ -51,7 +53,7 @@ void tcl_vol_rescan(void)
         }
     }
     g_vol_count = n;
-    tcl_logf(L"tclwext4: %d ext volume(s) found", n);
+    tcl_logf(L"tclwext4: %d volume(s) found", n);
 }
 
 int tcl_ext_mount(tcl_volume *v)

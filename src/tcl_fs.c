@@ -16,6 +16,7 @@
  */
 #include "tcl_fs.h"
 #include "ff.h"
+#include "squashfuse.h"
 #include "ext4_inode.h"
 #include "ext4_super.h"
 #include <stdio.h>
@@ -23,18 +24,30 @@
 
 struct tcl_file {
     tcl_volume *v;
-    bool        fat;
+    int         kind;          /* tcl_fs_kind */
     ext4_file   e;
     FIL         f;
+    sqfs_inode  sino;          /* SquashFS: the open inode */
+    uint64_t    spos;          /* SquashFS: read cursor */
 };
 
 struct tcl_dirh {
     tcl_volume *v;
-    bool        fat;
+    int         kind;
     ext4_dir    ed;
     char        ebase[768];
     DIR         fd;
+    sqfs_inode  sino;          /* SquashFS: the directory inode */
+    sqfs_dir    sdir;
+    char        sbase[768];    /* SquashFS: volume-relative dir path, UTF-8 */
 };
+
+/* from tcl_fs_sqfs.c */
+sqfs *tcl_sqfs_of(tcl_volume *v);
+bool  tcl_sqfs_lookup(tcl_volume *v, const wchar_t *rel, sqfs_inode *out);
+bool  tcl_sqfs_resolve_u8(tcl_volume *v, const char *rel, sqfs_inode *out);
+void  tcl_sqfs_fill(tcl_volume *v, sqfs_inode *ino, tcl_dirent *out);
+int   tcl_sqfs_statfs(tcl_volume *v, uint64_t *total, uint64_t *freebytes);
 
 /* from tcl_fs_fat.c */
 void tcl_fat_path(tcl_volume *v, const wchar_t *rel, wchar_t *out, size_t n);
@@ -110,17 +123,22 @@ int tcl_fs_mount(tcl_volume *v)
         return EOK;
     if (!v->part.mountable)
         return ENOTSUP;
-    return (v->fs == TCL_FS_FAT) ? tcl_fat_mount(v) : tcl_ext_mount(v);
+    switch (v->fs) {
+    case TCL_FS_FAT:  return tcl_fat_mount(v);
+    case TCL_FS_SQFS: return tcl_sqfs_mount(v);
+    default:          return tcl_ext_mount(v);
+    }
 }
 
 void tcl_fs_unmount(tcl_volume *v)
 {
     if (!v->mounted)
         return;
-    if (v->fs == TCL_FS_FAT)
-        tcl_fat_unmount(v);
-    else
-        tcl_ext_unmount(v);
+    switch (v->fs) {
+    case TCL_FS_FAT:  tcl_fat_unmount(v);  break;
+    case TCL_FS_SQFS: tcl_sqfs_unmount(v); break;
+    default:          tcl_ext_unmount(v);  break;
+    }
 }
 
 /* ------------------------------------------------------------ files */
@@ -138,9 +156,19 @@ tcl_file *tcl_fs_fopen(tcl_volume *v, const wchar_t *path, bool for_write)
     if (!f)
         return NULL;
     f->v = v;
-    f->fat = (v->fs == TCL_FS_FAT);
+    f->kind = v->fs;
 
-    if (f->fat) {
+    if (f->kind == TCL_FS_SQFS) {
+        if (for_write) {          /* SquashFS has no write path at all */
+            LocalFree(f);
+            return NULL;
+        }
+        if (!tcl_sqfs_lookup(v, rel, &f->sino)) {
+            LocalFree(f);
+            return NULL;
+        }
+        f->spos = 0;
+    } else if (f->kind == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
         tcl_fat_path(v, rel, p, _countof(p));
         if (f_open(&f->f, p, for_write ? (FA_WRITE | FA_CREATE_ALWAYS)
@@ -161,7 +189,23 @@ tcl_file *tcl_fs_fopen(tcl_volume *v, const wchar_t *path, bool for_write)
 
 int tcl_fs_fread(tcl_file *f, void *buf, size_t len, size_t *got)
 {
-    if (f->fat) {
+    if (f->kind == TCL_FS_SQFS) {
+        sqfs *fs = tcl_sqfs_of(f->v);
+        sqfs_off_t n = (sqfs_off_t)len;
+        uint64_t size = f->sino.xtra.reg.file_size;
+
+        if (!fs)
+            return EIO;
+        if (f->spos >= size) { *got = 0; return EOK; }
+        if (f->spos + n > size)
+            n = (sqfs_off_t)(size - f->spos);
+        if (sqfs_read_range(fs, &f->sino, (sqfs_off_t)f->spos, &n, buf) != SQFS_OK)
+            return EIO;
+        f->spos += (uint64_t)n;
+        *got = (size_t)n;
+        return EOK;
+    }
+    if (f->kind == TCL_FS_FAT) {
         UINT br = 0;
         if (f_read(&f->f, buf, (UINT)len, &br) != FR_OK)
             return EIO;
@@ -173,7 +217,9 @@ int tcl_fs_fread(tcl_file *f, void *buf, size_t len, size_t *got)
 
 int tcl_fs_fwrite(tcl_file *f, const void *buf, size_t len, size_t *put)
 {
-    if (f->fat) {
+    if (f->kind == TCL_FS_SQFS)
+        return EROFS;
+    if (f->kind == TCL_FS_FAT) {
         UINT bw = 0;
         if (f_write(&f->f, buf, (UINT)len, &bw) != FR_OK)
             return EIO;
@@ -185,17 +231,22 @@ int tcl_fs_fwrite(tcl_file *f, const void *buf, size_t len, size_t *put)
 
 uint64_t tcl_fs_fsize(tcl_file *f)
 {
-    return f->fat ? (uint64_t)f_size(&f->f) : ext4_fsize(&f->e);
+    switch (f->kind) {
+    case TCL_FS_SQFS: return (uint64_t)f->sino.xtra.reg.file_size;
+    case TCL_FS_FAT:  return (uint64_t)f_size(&f->f);
+    default:          return ext4_fsize(&f->e);
+    }
 }
 
 void tcl_fs_fclose(tcl_file *f)
 {
     if (!f)
         return;
-    if (f->fat)
+    if (f->kind == TCL_FS_FAT)
         f_close(&f->f);
-    else
+    else if (f->kind == TCL_FS_EXT)
         ext4_fclose(&f->e);
+    /* SquashFS holds no per-file resources: the inode is a value. */
     LocalFree(f);
 }
 
@@ -214,9 +265,26 @@ tcl_dirh *tcl_fs_opendir(tcl_volume *v, const wchar_t *path)
     if (!d)
         return NULL;
     d->v = v;
-    d->fat = (v->fs == TCL_FS_FAT);
+    d->kind = v->fs;
 
-    if (d->fat) {
+    if (d->kind == TCL_FS_SQFS) {
+        sqfs *fs = tcl_sqfs_of(v);
+        if (!fs || !tcl_sqfs_lookup(v, rel, &d->sino) ||
+            sqfs_dir_open(fs, &d->sino, &d->sdir, 0) != SQFS_OK) {
+            LocalFree(d);
+            return NULL;
+        }
+        if (rel && *rel) {
+            char *u8 = tcl_w_to_u8(rel);
+            if (u8) {
+                for (char *c = u8; *c; c++)
+                    if (*c == '\\') *c = '/';
+                strcpy_s(d->sbase, sizeof(d->sbase), u8);
+                strcat_s(d->sbase, sizeof(d->sbase), "/");
+                LocalFree(u8);
+            }
+        }
+    } else if (d->kind == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
         tcl_fat_path(v, rel, p, _countof(p));
         if (f_opendir(&d->fd, p) != FR_OK) {
@@ -242,7 +310,68 @@ bool tcl_fs_readdir(tcl_dirh *d, tcl_dirent *out)
 {
     ZeroMemory(out, sizeof(*out));
 
-    if (d->fat) {
+    if (d->kind == TCL_FS_SQFS) {
+        sqfs *fs = tcl_sqfs_of(d->v);
+        sqfs_dir_entry entry;
+        char namebuf[SQUASHFS_NAME_LEN + 1];
+        sqfs_err err = SQFS_OK;
+        sqfs_inode ino;
+        wchar_t *w;
+
+        if (!fs)
+            return false;
+        sqfs_dentry_init(&entry, namebuf);
+        if (!sqfs_dir_next(fs, &d->sdir, &entry, &err) || err != SQFS_OK)
+            return false;
+
+        w = tcl_u8_to_w(sqfs_dentry_name(&entry));
+        if (!w)
+            return false;
+        wcsncpy_s(out->name, MAX_PATH, w, _TRUNCATE);
+        LocalFree(w);
+
+        /* Fill from the inode rather than the dentry: the dentry carries only
+           a type, not size or timestamp. */
+        if (sqfs_inode_get(fs, &ino, sqfs_dentry_inode(&entry)) != SQFS_OK) {
+            out->is_dir    = sqfs_dentry_is_dir(&entry);
+            out->read_only = true;
+            return true;
+        }
+        tcl_sqfs_fill(d->v, &ino, out);
+
+        /*
+         * Follow the link so a symlinked directory is enterable and a symlinked
+         * file reports the target's size - matching the ext backend. The row
+         * keeps the link's own name and its REPARSE_POINT marker.
+         */
+        if (out->is_link) {
+            char full[1024];
+            sqfs_inode tgt;
+
+            strcpy_s(full, sizeof(full), d->sbase);
+            strcat_s(full, sizeof(full), sqfs_dentry_name(&entry));
+            if (tcl_sqfs_resolve_u8(d->v, full, &tgt)) {
+                tcl_sqfs_fill(d->v, &tgt, out);
+                out->is_link = true;    /* keep the marker after refilling */
+                tcl_logf(L"tclwext4: sqfs: listed link '%S' -> %s, %llu bytes",
+                         full, out->is_dir ? L"dir" : L"file",
+                         (unsigned long long)out->size);
+            } else {
+                tcl_logf(L"tclwext4: sqfs: could not resolve link '%S'", full);
+            }
+        } else if (sqfs_dentry_type(&entry) == SQUASHFS_SYMLINK_TYPE ||
+                   sqfs_dentry_type(&entry) == SQUASHFS_LSYMLINK_TYPE) {
+            /* The dentry says symlink but the inode mode did not. That would
+               mean S_ISLNK/sqfs_mode disagree - worth knowing about. */
+            tcl_logf(L"tclwext4: sqfs: '%S' is a symlink by dentry type %d but "
+                     L"inode_type %d did not test as one",
+                     sqfs_dentry_name(&entry), sqfs_dentry_type(&entry),
+                     ino.base.inode_type);
+        }
+        return true;
+    }
+
+    if (d->kind == TCL_FS_FAT) {
         FILINFO fi;
         if (f_readdir(&d->fd, &fi) != FR_OK || fi.fname[0] == 0)
             return false;
@@ -255,7 +384,7 @@ bool tcl_fs_readdir(tcl_dirh *d, tcl_dirent *out)
         return true;
     }
 
-    for (;;) {
+    for (;;) {   /* ext */
         const ext4_direntry *de = ext4_dir_entry_next(&d->ed);
         char nm[256], full[768], resolved[768];
         const char *target;
@@ -305,10 +434,11 @@ void tcl_fs_closedir(tcl_dirh *d)
 {
     if (!d)
         return;
-    if (d->fat)
+    if (d->kind == TCL_FS_FAT)
         f_closedir(&d->fd);
-    else
+    else if (d->kind == TCL_FS_EXT)
         ext4_dir_close(&d->ed);
+    /* sqfs_dir needs no teardown. */
     LocalFree(d);
 }
 
@@ -322,6 +452,14 @@ int tcl_fs_stat(tcl_volume *v, const wchar_t *path, tcl_dirent *out)
     if (!vv || vv != v)
         return ENOENT;
     ZeroMemory(out, sizeof(*out));
+
+    if (v->fs == TCL_FS_SQFS) {
+        sqfs_inode ino;
+        if (!tcl_sqfs_lookup(v, rel, &ino))
+            return ENOENT;
+        tcl_sqfs_fill(v, &ino, out);
+        return EOK;
+    }
 
     if (v->fs == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
@@ -361,6 +499,8 @@ int tcl_fs_mkdir(tcl_volume *v, const wchar_t *path)
     const wchar_t *rel;
     if (!tcl_fs_resolve(path, &rel))
         return ENOENT;
+    if (v->fs == TCL_FS_SQFS)
+        return EROFS;
     if (v->fs == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
         FAT_PATH(v, rel, p);
@@ -378,6 +518,8 @@ int tcl_fs_unlink(tcl_volume *v, const wchar_t *path)
     const wchar_t *rel;
     if (!tcl_fs_resolve(path, &rel))
         return ENOENT;
+    if (v->fs == TCL_FS_SQFS)
+        return EROFS;
     if (v->fs == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
         FAT_PATH(v, rel, p);
@@ -395,6 +537,8 @@ int tcl_fs_rmdir(tcl_volume *v, const wchar_t *path)
     const wchar_t *rel;
     if (!tcl_fs_resolve(path, &rel))
         return ENOENT;
+    if (v->fs == TCL_FS_SQFS)
+        return EROFS;
     if (v->fs == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
         FAT_PATH(v, rel, p);
@@ -413,6 +557,8 @@ int tcl_fs_rename(tcl_volume *v, const wchar_t *from, const wchar_t *to)
     const wchar_t *rf, *rt;
     if (!tcl_fs_resolve(from, &rf) || !tcl_fs_resolve(to, &rt))
         return ENOENT;
+    if (v->fs == TCL_FS_SQFS)
+        return EROFS;
     if (v->fs == TCL_FS_FAT) {
         wchar_t a[MAX_PATH], b[MAX_PATH];
         FAT_PATH(v, rf, a);
@@ -432,6 +578,8 @@ int tcl_fs_set_times(tcl_volume *v, const wchar_t *path,
     const wchar_t *rel;
     if (!tcl_fs_resolve(path, &rel))
         return ENOENT;
+    if (v->fs == TCL_FS_SQFS)
+        return EROFS;
 
     if (v->fs == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
@@ -462,6 +610,8 @@ int tcl_fs_set_readonly(tcl_volume *v, const wchar_t *path, bool ro)
     const wchar_t *rel;
     if (!tcl_fs_resolve(path, &rel))
         return ENOENT;
+    if (v->fs == TCL_FS_SQFS)
+        return EROFS;
 
     if (v->fs == TCL_FS_FAT) {
         wchar_t p[MAX_PATH];
@@ -483,6 +633,8 @@ void tcl_fs_flush(tcl_volume *v)
 {
     if (!v->mounted)
         return;
+    if (v->fs == TCL_FS_SQFS)
+        return;                 /* nothing is ever dirty */
     if (v->fs == TCL_FS_FAT)
         FlushFileBuffers(v->bdev.h);
     else
@@ -493,6 +645,9 @@ int tcl_fs_statfs(tcl_volume *v, uint64_t *total, uint64_t *freebytes)
 {
     if (!v->mounted)
         return EIO;
+
+    if (v->fs == TCL_FS_SQFS)
+        return tcl_sqfs_statfs(v, total, freebytes);
 
     if (v->fs == TCL_FS_FAT) {
         wchar_t drv[8];

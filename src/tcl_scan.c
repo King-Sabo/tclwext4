@@ -266,6 +266,88 @@ reject:
     return false;
 }
 
+/* --------------------------------------------------------- SquashFS probe */
+
+#define SQFS_MAGIC 0x73717368u   /* "hsqs" little-endian */
+
+/* Compression ids from the SquashFS superblock. */
+static const wchar_t *sqfs_comp_name(uint16_t c)
+{
+    switch (c) {
+    case 1: return L"gzip";
+    case 2: return L"lzma";
+    case 3: return L"lzo";
+    case 4: return L"xz";
+    case 5: return L"lz4";
+    case 6: return L"zstd";
+    default: return L"unknown";
+    }
+}
+
+/*
+ * Allowed on physical disks as well as images: SquashFS is read-only, and
+ * Windows has no driver for it, so there is no second writer to race with.
+ *
+ * The compression id is checked here rather than at mount time so an image
+ * built with a codec we did not link says so during the scan, instead of
+ * mounting and then failing on the first read.
+ */
+bool tcl_probe_sqfs(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_part *p)
+{
+    uint8_t sb[96];
+    uint32_t magic;
+    uint16_t major, minor, comp;
+    uint64_t bytes_used;
+    bool supported;
+
+    if (size < 8192)
+        return false;
+    if (!tcl_read_at(h, off, sb, sizeof(sb), sect))
+        return false;
+
+    magic = rd32(sb, 0);
+    if (magic != SQFS_MAGIC)
+        return false;
+
+    comp       = rd16(sb, 20);
+    major      = rd16(sb, 28);
+    minor      = rd16(sb, 30);
+    bytes_used = rd64(sb, 40);
+
+    if (major != 4) {
+        tcl_logf(L"tclwext4: scan: SquashFS at %llu is version %u.%u; only 4.0 is supported",
+                 (unsigned long long)off, major, minor);
+        return false;
+    }
+
+    /* Only the codecs actually linked in. */
+    supported = (comp == 1 /* gzip */ || comp == 5 /* lz4 */);
+
+    p->offset     = off;
+    p->size       = size;
+    p->sector     = sect;
+    p->fskind     = TCL_FSK_SQFS;
+    p->block_size = rd32(sb, 12);
+    p->blocks     = bytes_used ? bytes_used / (p->block_size ? p->block_size : 1) : 0;
+    p->mountable  = supported;
+    p->force_ro   = true;     /* nothing about SquashFS is writable */
+    wcscpy_s(p->ro_reason, _countof(p->ro_reason), L"SquashFS is read-only");
+    p->fslabel[0] = 0;        /* SquashFS has no volume label */
+
+    if (!supported) {
+        swprintf_s(p->ro_reason, _countof(p->ro_reason),
+                   L"unsupported compression: %s", sqfs_comp_name(comp));
+        tcl_logf(L"tclwext4: scan: SquashFS at %llu uses %s compression, "
+                 L"which this build does not include (gzip and lz4 only)",
+                 (unsigned long long)off, sqfs_comp_name(comp));
+    } else {
+        tcl_logf(L"tclwext4: scan: SquashFS 4.%u at %llu, %s, %llu bytes used",
+                 minor, (unsigned long long)off, sqfs_comp_name(comp),
+                 (unsigned long long)bytes_used);
+    }
+    return true;
+}
+
 /* --------------------------------------------------- image table parse */
 
 static void add_part(tcl_part *out, int max, int *n, HANDLE h,
@@ -281,6 +363,8 @@ static void add_part(tcl_part *out, int max, int *n, HANDLE h,
     ZeroMemory(&p, sizeof(p));
     if (tcl_probe_ext(h, off, size, sect, &p)) {
         p.fskind = TCL_FSK_EXT;
+    } else if (tcl_probe_sqfs(h, off, size, sect, &p)) {
+        /* allowed on physical disks too - read-only, no Windows driver */
     } else if (kind == TCL_SRC_IMAGE && tcl_probe_fat(h, off, size, sect, &p)) {
         /* images only - deliberately not attempted on physical disks */
     } else {
@@ -291,7 +375,9 @@ static void add_part(tcl_part *out, int max, int *n, HANDLE h,
         return;
     }
     tcl_logf(L"tclwext4: scan: partition %d at %llu -> %s", part_no,
-             (unsigned long long)off, p.fskind == TCL_FSK_FAT ? L"FAT" : L"ext");
+             (unsigned long long)off,
+             p.fskind == TCL_FSK_FAT  ? L"FAT" :
+             p.fskind == TCL_FSK_SQFS ? L"SquashFS" : L"ext");
 
     wcsncpy_s(p.backing, MAX_PATH, backing, _TRUNCATE);
     p.kind    = kind;

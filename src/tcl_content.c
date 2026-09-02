@@ -133,7 +133,8 @@ int __stdcall FsContentGetValueW(WCHAR *FileName, int FieldIndex, int UnitIndex,
     case FLD_TYPE:
         swprintf_s(buf, _countof(buf), L"%s / %s",
                    v->part.kind == TCL_SRC_IMAGE ? L"image" : L"partition",
-                   v->part.fskind == TCL_FSK_FAT ? L"FAT" : L"ext");
+                   v->part.fskind == TCL_FSK_FAT  ? L"FAT" :
+                   v->part.fskind == TCL_FSK_SQFS ? L"SquashFS" : L"ext");
         put_w(FieldValue, maxlen, buf);
         LeaveCriticalSection(&g_ext4_cs);
         return ft_stringw;
@@ -209,9 +210,9 @@ int __stdcall FsContentGetValueW(WCHAR *FileName, int FieldIndex, int UnitIndex,
     }
 
     case FLD_FEATURES:
-        if (v->part.fskind == TCL_FSK_FAT) {
+        if (v->part.fskind != TCL_FSK_EXT) {
             LeaveCriticalSection(&g_ext4_cs);
-            return ft_fieldempty;       /* FAT has no feature flags */
+            return ft_fieldempty;       /* only ext has feature flags */
         }
         swprintf_s(buf, _countof(buf), L"c:%08X i:%08X r:%08X",
                    v->part.f_compat, v->part.f_incompat, v->part.f_ro_compat);

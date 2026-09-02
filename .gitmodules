@@ -4,3 +4,9 @@
 [submodule "external/fatfs"]
 	path = external/fatfs
 	url = https://github.com/abbrev/fatfs.git
+[submodule "external/squashfuse"]
+	path = external/squashfuse
+	url = https://github.com/vasi/squashfuse.git
+[submodule "external/lz4"]
+	path = external/lz4
+	url = https://github.com/lz4/lz4.git

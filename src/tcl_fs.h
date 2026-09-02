@@ -19,7 +19,8 @@
 typedef enum {
     TCL_FS_NONE = 0,
     TCL_FS_EXT,          /* ext2/3/4 via lwext4      */
-    TCL_FS_FAT           /* FAT12/16/32 via FatFs    */
+    TCL_FS_FAT,          /* FAT12/16/32 via FatFs    */
+    TCL_FS_SQFS          /* SquashFS via squashfuse, always read-only */
 } tcl_fs_kind;
 
 typedef struct {
@@ -73,5 +74,7 @@ int  tcl_ext_mount(tcl_volume *v);
 void tcl_ext_unmount(tcl_volume *v);
 int  tcl_fat_mount(tcl_volume *v);
 void tcl_fat_unmount(tcl_volume *v);
+int  tcl_sqfs_mount(tcl_volume *v);
+void tcl_sqfs_unmount(tcl_volume *v);
 
 #endif /* TCL_FS_H_ */

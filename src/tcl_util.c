@@ -15,18 +15,57 @@ void tcl_set_log_proc(int plugin_nr, tLogProcW proc)
     g_log_proc  = proc;
 }
 
+bool g_debug_log = false;
+
+static void tcl_emit(const wchar_t *buf, bool to_debugger)
+{
+    if (to_debugger) {
+        OutputDebugStringW(buf);
+        OutputDebugStringW(L"\r\n");
+    }
+    if (g_log_proc)
+        g_log_proc(g_plugin_nr, 3 /* msgtype_details */, buf);
+}
+
+/*
+ * Kept in Release. Reaches Total Commander's log whenever TC gave us a LogProc,
+ * and OutputDebugString in Debug builds or when debuglog=1 is set in the ini -
+ * so a volume that mounts read-only can still be diagnosed in the field without
+ * shipping a debug build.
+ */
 void tcl_logf(const wchar_t *fmt, ...)
 {
     wchar_t buf[1024];
     va_list ap;
+    bool dbg;
 
-    if (!g_log_proc)
-        return;
+#ifdef _DEBUG
+    dbg = true;
+#else
+    dbg = g_debug_log;
+#endif
+
     va_start(ap, fmt);
     _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, ap);
     va_end(ap);
-    g_log_proc(g_plugin_nr, 3 /* msgtype_details */, buf);
+
+    tcl_emit(buf, dbg);
 }
+
+#if defined(_DEBUG) || defined(TCLWEXT4_VERBOSE)
+/* Per-entry chatter. The whole function is absent from a Release build. */
+void tcl_dbgf(const wchar_t *fmt, ...)
+{
+    wchar_t buf[1024];
+    va_list ap;
+
+    va_start(ap, fmt);
+    _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, ap);
+    va_end(ap);
+
+    tcl_emit(buf, true);
+}
+#endif
 
 wchar_t *tcl_u8_to_w(const char *s)
 {

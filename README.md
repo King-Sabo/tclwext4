@@ -1,14 +1,17 @@
 # tclwext4
 
-Total Commander WFX file system plugin giving read/write access from Windows to
-ext2/ext3/ext4 volumes on disks, USB sticks and images, and to FAT12/16/32
-partitions inside images.
+Total Commander WFX file system plugin giving access from Windows to:
 
-Two unmodified upstream libraries do the filesystem work:
-[lwext4](https://github.com/gkostka/lwext4) for ext, and
-[FatFs](http://elm-chan.org/fsw/ff/) for FAT. Both are vendored as submodules
-and neither is patched; a small abstraction in `src/tcl_fs.c` puts them behind
-one API so the Total Commander plumbing is written once.
+- **ext2/3/4** — read/write, on disks, USB sticks and images
+- **SquashFS** — read-only, anywhere (gzip and lz4 compression)
+- **FAT12/16/32** — read/write, inside images only
+
+Unmodified upstream libraries do the filesystem work:
+[lwext4](https://github.com/gkostka/lwext4),
+[squashfuse](https://github.com/vasi/squashfuse) and
+[FatFs](http://elm-chan.org/fsw/ff/). All are vendored as submodules and none is
+patched; an abstraction in `src/tcl_fs.c` puts them behind one API so the Total
+Commander plumbing is written once.
 
 ---
 
@@ -139,6 +142,8 @@ There are two submodules:
 |---|---|---|
 | `external/lwext4` | [gkostka/lwext4](https://github.com/gkostka/lwext4) | ext2/3/4 |
 | `external/fatfs` | [FatFs](http://elm-chan.org/fsw/ff/), via the [abbrev/fatfs](https://github.com/abbrev/fatfs) mirror | FAT12/16/32, exFAT |
+| `external/squashfuse` | [vasi/squashfuse](https://github.com/vasi/squashfuse) | SquashFS 4.0 reader |
+| `external/lz4` | [lz4/lz4](https://github.com/lz4/lz4) | lz4 decompression |
 
 `git submodule update --init --recursive` runs automatically as a pre-build step
 when either is empty, so a fresh clone builds without setup — `FetchLwext4` in
@@ -245,8 +250,12 @@ identical: these headers are shared, and a mismatch in e.g.
 `tcl_scan_all()` walks `\\.\PhysicalDrive0..63`. Partitions come from
 `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`, so Windows does MBR (including the EBR chain)
 and GPT parsing. Partition **type codes are ignored** — every partition is
-probed for an ext superblock, and so is the whole device when there is no
-partition table (mkfs straight onto a USB stick).
+probed directly, and so is the whole device when there is no partition table
+(mkfs straight onto a USB stick).
+
+Probes run in order: **ext** superblock, then **SquashFS** magic, then **FAT**
+BPB. FAT is attempted for image partitions only; the other two are attempted
+everywhere. Each probe is logged, with the reason when a candidate is rejected.
 
 Raw disk images added through `[add image...]` are parsed here instead: GPT
 first, then MBR plus logical partitions, and if neither is present the whole
@@ -289,13 +298,62 @@ FAT stores wall-clock local time with no timezone, so every conversion goes
 through the local-time API. A timestamp written in one timezone reads back
 differently in another — that is FAT's behaviour, not a bug here.
 
+## SquashFS support
+
+Read-only, which is not a limitation imposed here — SquashFS has no write path
+at all. That makes it by far the safest of the three: no journal, no write-back
+cache, no partial-update window, nothing to `fsck` afterwards. Every mutating
+operation returns `EROFS` and the volume always mounts read-only.
+
+**Allowed on physical disks as well as images**, unlike FAT. Windows has no
+SquashFS driver, so there is no second writer to race with — and since the
+plugin never writes, there would be nothing to race about regardless. A bare
+`.squashfs` or `.sfs` file added through `[add image...]` works too, via the
+same no-partition-table fallback that handles dd-style images.
+
+**Compression: gzip and lz4 only.** SquashFS supports six codecs; this build
+handles two. gzip needs no external library — squashfuse includes
+`win/win_decompress.c.inc` unconditionally on `_WIN32`, implementing the gzip
+decompressor over the bundled tinfl (`win/tinfl.c`). Linking real zlib as well
+duplicates `sqfs_decompressor_zlib`, so `HAVE_ZLIB_H` must stay undefined. lz4
+is the only decompressor submodule. The compression id is checked during the *scan*, not at mount, so an
+image built with xz, zstd or lzo appears in the listing with its `Status` column
+reading `unsupported: xz` rather than mounting and then failing on the first
+read. Adding a codec is a matter of another decompressor library plus its
+`HAVE_*_H` define — liblzma is the awkward one, being autotools-oriented.
+
+**One generated file pair.** squashfuse derives its byte-swapping functions
+from the structs in `squashfs_fs.h` using `gen_swap.sh`, a sed script run by its
+autotools build. An MSVC build has no sed, so pre-generated `swap.h.inc` and
+`swap.c.inc` are committed in `config/squashfuse/` and picked up via the include
+path — `swap.h` includes them with quotes, which falls back to `/I` after the
+submodule directory misses. **Nothing needs regenerating to build this repo:
+clone, open the solution, build.**
+
+They can only diverge if someone bumps the squashfuse submodule to a commit
+whose `squashfs_fs.h` differs, which the gitlink makes a deliberate act rather
+than an accident. `src/tcl_fs_sqfs.c` carries `_STATIC_ASSERT`s on the two key
+structure sizes so that divergence fails at compile time rather than silently
+mis-decoding. To regenerate after a deliberate bump, from git-bash or WSL:
+
+```
+cd external/squashfuse && sh gen_swap.sh squashfs_fs.h
+mv swap.h.inc swap.c.inc ../../config/squashfuse/
+```
+
+Otherwise squashfuse needed no porting work: it ships `win/win32.h` with
+`typedef HANDLE sqfs_fd_t`, and `sqfs_init(fs, fd, offset)` takes a byte offset,
+which is exactly what `tcl_bdev` holds for a partition.
+
 ## Read-only policy
 
-The plugin drops a volume to read-only, rather than risking corruption, when
-any of these hold:
+SquashFS volumes are always read-only — the format has no write path, so this is
+not a restriction imposed here. For ext and FAT, the plugin drops a volume to
+read-only, rather than risking corruption, when any of these hold:
 
 | Condition | Why |
 |---|---|
+| the volume is SquashFS | read-only by format |
 | `ro_compat` bits outside `EXT4_SUPPORTED_FRO_COM` | lwext4 would ignore semantics it does not implement |
 | `INCOMPAT_RECOVER` set | lwext4 lists this as *ignored* and will mount over an unreplayed journal |
 | `INCOMPAT_MMP` set | multi-mount protection cannot be honoured |
@@ -385,9 +443,13 @@ Settings live under `[tclwext4]`:
 
 ```
 readonly=0
+debuglog=0
 image1=D:\sd.img
 image2=D:\rootfs.ext4
 ```
+
+`readonly=1` forces every writable volume read-only. `debuglog=1` sends the
+kept log lines to `OutputDebugString` in a Release build; see Diagnostics.
 
 ## Symlinks
 
@@ -420,14 +482,56 @@ nature:
 Timestamps follow symlinks (`utimes()` semantics, not `lutimes()`), because path
 resolution follows them everywhere.
 
+Symlinks are followed on SquashFS as well as ext, at every path component. One
+difference in the implementation: SquashFS directories carry no `.` or `..`
+entries, so a relative target such as `../lib/libfoo.so` cannot be walked by
+lookup and is folded into the path lexically first. Targets that would escape
+above the image root are clamped to it, and absolute targets are re-rooted at
+the image, never at a host path.
+
+## Diagnostics
+
+Logging has two levels.
+
+**Kept in Release** — one line per volume found, per mount, and per read-only
+decision, plus the version and settings path at startup. These are the lines the
+sections above point you at when a volume mounts read-only or a partition is not
+recognised. They reach:
+
+- Total Commander's plugin log whenever TC supplies a `LogProc`. That needs a
+  log file configured under *Configuration > Options > FTP*, and whether
+  `msgtype_details` reaches it varies between TC versions.
+- `OutputDebugString`, in Debug builds always, and in Release only when
+  `debuglog=1` is set in the ini — so a volume can still be diagnosed in the
+  field without swapping in a debug build.
+
+**Compiled out in Release** — per-entry chatter: symlink resolution, per-check
+scan rejections, FAT BPB field failures. `tcl_dbgf()` is a macro expanding to
+nothing unless `_DEBUG` or `TCLWEXT4_VERBOSE` is defined, so a shipped plugin
+never emits a line per directory entry.
+
+Capture either with
+[DebugView](https://learn.microsoft.com/sysinternals/downloads/debugview),
+filtered on `tclwext4`. Run DebugView elevated if Total Commander is elevated,
+or it will not see the process. `OutputDebugString` also works during the
+startup scan, before TC has supplied a log callback.
+
 ## Known limits
 
-- Cross-volume rename returns `FS_FILE_NOTSUPPORTED`; TC falls back to copy+delete.
+- Cross-volume rename returns `FS_FILE_NOTSUPPORTED`; TC falls back to
+  copy+delete. This also covers moving between the ext and FAT partitions of one
+  image, since those are separate volumes.
 - Resume is not supported for either direction.
 - lwext4 is not thread-safe; all calls are serialised through one critical
-  section, so parallel panel operations do not overlap.
-- Write-back caching is enabled for multi-file operations and flushed at the end
-  of each file, so an abort costs at most the file in flight.
+  section, so parallel panel operations do not overlap. FatFs and squashfuse go
+  through the same lock.
+- Write-back caching (ext only) is enabled for multi-file operations and flushed
+  at the end of each file, so an abort costs at most the file in flight.
+- SquashFS is read-only, gzip and lz4 only, and version 4.0 only.
+- FAT is not offered on physical disks, deliberately — see FAT support.
+- No extension association: the plugin is reachable through Network
+  Neighborhood or an explicit `cd`, because extension association belongs to
+  TC's packer (WCX) interface, not the file system (WFX) one.
 
 ## Versioning
 

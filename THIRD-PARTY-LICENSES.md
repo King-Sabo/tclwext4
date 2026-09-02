@@ -64,6 +64,20 @@ resolved before it could be combined with lwext4's GPL-2.0-or-later code. It als
 keeps its filesystem state in a single global, so only one FAT volume could be
 mounted at a time.
 
+## squashfuse, lz4, zlib
+
+| Component | Upstream | License |
+|---|---|---|
+| squashfuse (non-FUSE core) | https://github.com/vasi/squashfuse | BSD-2-Clause |
+| lz4 (`lib/lz4.c` only) | https://github.com/lz4/lz4 | BSD-2-Clause |
+| zlib (inflate only) | https://github.com/madler/zlib | zlib License |
+
+All three are permissive and GPL-compatible, and none changes tclwext4's
+GPL-2.0-or-later status. Only their copyright notices must be retained.
+
+`squashfs_fs.h` inside squashfuse is copyright Phillip Lougher, distributed
+under the same BSD-2-Clause terms with his permission.
+
 ## Total Commander plugin interface
 
 `src/wfxplugin.h` was written against Ghisler's publicly documented WFX API. It

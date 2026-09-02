@@ -23,7 +23,27 @@
 wchar_t *tcl_u8_to_w(const char *s);
 char    *tcl_w_to_u8(const wchar_t *s);
 
-void tcl_logf(const wchar_t *fmt, ...);      /* -> TC log window */
+/*
+ * Two levels.
+ *
+ * tcl_logf  - low volume, kept in Release: volumes found, mount results,
+ *             read-only reasons. The README points users at these.
+ * tcl_dbgf  - per-entry chatter: symlink resolution, per-check scan rejections.
+ *             Compiled out entirely in Release, so a shipped plugin does not
+ *             emit a line per directory entry.
+ *
+ * In Release, tcl_logf reaches OutputDebugString only when debuglog=1 is set in
+ * the ini; it always reaches Total Commander's log when TC supplies a LogProc.
+ */
+void tcl_logf(const wchar_t *fmt, ...);
+
+#if defined(_DEBUG) || defined(TCLWEXT4_VERBOSE)
+void tcl_dbgf(const wchar_t *fmt, ...);
+#else
+#define tcl_dbgf(...) ((void)0)
+#endif
+
+extern bool g_debug_log;                     /* ini: debuglog=1 */
 void tcl_set_log(void *plugin_nr_and_proc);  /* set by FsInitW */
 
 uint64_t tcl_filetime_from_unix(uint32_t t);
@@ -68,7 +88,8 @@ typedef enum {
 typedef enum {
     TCL_FSK_NONE = 0,
     TCL_FSK_EXT,
-    TCL_FSK_FAT
+    TCL_FSK_FAT,
+    TCL_FSK_SQFS
 } tcl_fs_kind_e;
 
 typedef struct {
@@ -102,6 +123,10 @@ bool tcl_probe_ext(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_par
 /* Probe for a FAT12/16/32 BPB. Images only - see tcl_scan.c for why. */
 bool tcl_probe_fat(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_part *p);
 
+/* Probe for a SquashFS superblock. Allowed everywhere: read-only, and Windows
+   has no SquashFS driver to conflict with. */
+bool tcl_probe_sqfs(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_part *p);
+
 /* -------------------------------------------------------------- volume */
 
 typedef struct {
@@ -109,6 +134,7 @@ typedef struct {
     bool      mounted;
     int       fs;            /* tcl_fs_kind from tcl_fs.h */
     int       fat_pdrv;      /* FatFs drive slot, -1 when not FAT */
+    int       sqfs_slot;     /* squashfuse slot, -1 when not SquashFS */
     tcl_part  part;
     tcl_bdev  bdev;
     char      dev_name[64];   /* lwext4 device name  */

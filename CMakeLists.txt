@@ -8,6 +8,8 @@ endif()
 
 set(LWEXT4_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/lwext4)
 set(FATFS_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/external/fatfs)
+set(SQFS_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/external/squashfuse)
+set(LZ4_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/external/lz4)
 if(NOT EXISTS ${LWEXT4_DIR}/src/ext4.c)
     find_package(Git QUIET)
     if(NOT GIT_FOUND)
@@ -49,6 +51,35 @@ endif()
 if(NOT EXISTS ${FATFS_DIR}/source/ff.c)
     message(FATAL_ERROR "Could not obtain FatFs at ${FATFS_DIR}")
 endif()
+
+# Remaining submodules share one bootstrap: submodule update, then a direct
+# clone for the no-gitlink and source-download cases.
+function(tcl_need_submodule dir probe url name)
+    if(EXISTS "${probe}")
+        return()
+    endif()
+    find_package(Git QUIET)
+    if(NOT GIT_FOUND)
+        message(FATAL_ERROR "${name} missing and git not found on PATH")
+    endif()
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/.git)
+        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
+    if(NOT EXISTS "${probe}")
+        message(STATUS "cloning ${name}...")
+        execute_process(COMMAND ${GIT_EXECUTABLE} clone --depth 1 "${url}" "${dir}"
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
+    if(NOT EXISTS "${probe}")
+        message(FATAL_ERROR "Could not obtain ${name} at ${dir}")
+    endif()
+endfunction()
+
+tcl_need_submodule("${SQFS_DIR}" "${SQFS_DIR}/fs.c"
+                   "https://github.com/vasi/squashfuse.git" "squashfuse")
+tcl_need_submodule("${LZ4_DIR}"  "${LZ4_DIR}/lib/lz4.c"
+                   "https://github.com/lz4/lz4.git" "lz4")
 if(NOT EXISTS ${LWEXT4_DIR}/src/ext4.c)
     message(FATAL_ERROR "Could not obtain lwext4 at ${LWEXT4_DIR}")
 endif()
@@ -115,6 +146,49 @@ set_property(TARGET fatfs PROPERTY C_STANDARD 11)
 set_property(TARGET fatfs PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # ---------------------------------------------------------------------------
+# lz4
+#
+# squashfuse calls only LZ4_decompress_safe, so this is one translation unit -
+# no lz4frame, lz4hc or xxhash.
+#
+# There is no zlib target: squashfuse's Windows path includes
+# win/win_decompress.c.inc unconditionally, which implements the gzip
+# decompressor over tinfl (win/tinfl.c). Defining HAVE_ZLIB_H as well gives a
+# duplicate definition of sqfs_decompressor_zlib.
+# ---------------------------------------------------------------------------
+add_library(lz4 STATIC ${LZ4_DIR}/lib/lz4.c)
+target_include_directories(lz4 PUBLIC ${LZ4_DIR}/lib)
+target_compile_definitions(lz4 PUBLIC _CRT_SECURE_NO_WARNINGS)
+target_compile_options(lz4 PRIVATE /wd4244 /wd4267 /wd4996)
+set_property(TARGET lz4 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# ---------------------------------------------------------------------------
+# squashfuse
+#
+# Only the non-FUSE core. squashfuse already carries Windows support
+# (win/win32.h, sqfs_fd_t = HANDLE), so no shim is needed - but win/ must come
+# first on the include path for <win32.h> to resolve.
+# ---------------------------------------------------------------------------
+add_library(squashfuse STATIC
+    ${SQFS_DIR}/cache.c   ${SQFS_DIR}/decompress.c ${SQFS_DIR}/dir.c
+    ${SQFS_DIR}/file.c    ${SQFS_DIR}/fs.c         ${SQFS_DIR}/hash.c
+    ${SQFS_DIR}/stack.c   ${SQFS_DIR}/swap.c       ${SQFS_DIR}/table.c
+    ${SQFS_DIR}/util.c    ${SQFS_DIR}/xattr.c      ${SQFS_DIR}/nonstd-pread.c ${SQFS_DIR}/nonstd-stat.c
+    ${SQFS_DIR}/win/tinfl.c
+)
+# swap.h.inc / swap.c.inc are generated upstream by a sed script; pre-generated
+# copies live in config/squashfuse. swap.h includes them with quotes, which
+# falls back to the include path after the submodule directory misses.
+target_include_directories(squashfuse PUBLIC
+    ${SQFS_DIR}/win ${SQFS_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/config/squashfuse)
+
+target_compile_definitions(squashfuse PUBLIC HAVE_LZ4_H _CRT_SECURE_NO_WARNINGS)
+target_compile_options(squashfuse PRIVATE /wd4244 /wd4267 /wd4996 /wd4005)
+target_link_libraries(squashfuse PUBLIC lz4)
+set_property(TARGET squashfuse PROPERTY C_STANDARD 11)
+set_property(TARGET squashfuse PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# ---------------------------------------------------------------------------
 # The plugin
 # ---------------------------------------------------------------------------
 add_library(tclwext4 SHARED
@@ -127,11 +201,12 @@ add_library(tclwext4 SHARED
     src/tcl_dialog.c
     src/tcl_fs.c
     src/tcl_fs_fat.c
+    src/tcl_fs_sqfs.c
     src/tclwext4.rc
     src/tclwext4.def
 )
 
-target_link_libraries(tclwext4 PRIVATE lwext4 fatfs)
+target_link_libraries(tclwext4 PRIVATE lwext4 fatfs squashfuse)
 target_compile_definitions(tclwext4 PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tclwext4 PRIVATE /wd4244 /wd4267 /wd4996 /wd4005)
 target_include_directories(tclwext4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

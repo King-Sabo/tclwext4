@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{9E2C4A17-6B83-4D5F-A012-3C7E91D46B58}</ProjectGuid>
+    <RootNamespace>squashfuse</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset Condition="'$(PlatformToolset)'==''">v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard_C>stdc11</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(SqfsDir)\win;$(SqfsDir);$(ProjectDir)config\squashfuse;$(Lz4Dir)\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_LZ4_H;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <WarningLevel>Level3</WarningLevel>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <PropertyGroup>
+    <SqfsDir>$(ProjectDir)external\squashfuse</SqfsDir>
+    <Lz4Dir>$(ProjectDir)external\lz4</Lz4Dir>
+  </PropertyGroup>
+
+  <!--
+    Same two-stage bootstrap as the other submodules: a submodule update exits 0
+    and does nothing when .gitmodules lists a path with no gitlink in the index,
+    so a direct clone is the fallback.
+  -->
+  <Target Name="FetchSqfs" BeforeTargets="PrepareForBuild"
+          Condition="!Exists('$(SqfsDir)\fs.c') Or !Exists('$(Lz4Dir)\lib\lz4.c')">
+    <Message Importance="high" Text="squashfuse / lz4 not present - fetching..." />
+    <Exec Condition="Exists('$(ProjectDir).git')"
+          Command="git submodule update --init --recursive"
+          WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
+    <Exec Condition="!Exists('$(SqfsDir)\fs.c')"
+          Command="git clone --depth 1 https://github.com/vasi/squashfuse.git &quot;$(SqfsDir)&quot;"
+          WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
+    <Exec Condition="!Exists('$(Lz4Dir)\lib\lz4.c')"
+          Command="git clone --depth 1 https://github.com/lz4/lz4.git &quot;$(Lz4Dir)&quot;"
+          WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
+    <Error Condition="!Exists('$(SqfsDir)\fs.c')"  Text="Could not obtain squashfuse at $(SqfsDir)." />
+    <Error Condition="!Exists('$(Lz4Dir)\lib\lz4.c')" Text="Could not obtain lz4 at $(Lz4Dir)." />
+  </Target>
+
+  <!--
+    Only the non-FUSE core of squashfuse. It already carries Windows support
+    (win/win32.h, sqfs_fd_t = HANDLE), so win\ must precede the root on the
+    include path for <win32.h> to resolve.
+
+    gzip support needs no zlib: win_decompress.c.inc is included unconditionally
+    on _WIN32 and implements sqfs_decompressor_zlib via tinfl (win\tinfl.c).
+    Defining HAVE_ZLIB_H as well produces a duplicate definition.
+
+    lz4 needs one translation unit: squashfuse calls only LZ4_decompress_safe,
+    so lz4frame/lz4hc/xxhash are not required.
+  -->
+  <ItemGroup>
+    <ClCompile Include="external\squashfuse\cache.c" />
+    <ClCompile Include="external\squashfuse\decompress.c" />
+    <ClCompile Include="external\squashfuse\dir.c" />
+    <ClCompile Include="external\squashfuse\file.c" />
+    <ClCompile Include="external\squashfuse\fs.c" />
+    <ClCompile Include="external\squashfuse\hash.c" />
+    <ClCompile Include="external\squashfuse\stack.c" />
+    <ClCompile Include="external\squashfuse\swap.c" />
+    <ClCompile Include="external\squashfuse\table.c" />
+    <ClCompile Include="external\squashfuse\util.c" />
+    <ClCompile Include="external\squashfuse\xattr.c" />
+    <ClCompile Include="external\squashfuse\nonstd-pread.c" />
+    <ClCompile Include="external\squashfuse\nonstd-stat.c" />
+    <ClCompile Include="external\squashfuse\win\tinfl.c" />
+    <ClCompile Include="external\lz4\lib\lz4.c" />
+  </ItemGroup>
+
+  <!--
+    swap.h.inc / swap.c.inc are generated upstream by gen_swap.sh, a sed script
+    deriving byte-swap functions from the structs in squashfs_fs.h. An MSVC
+    build has no sed, so pre-generated copies live in config\squashfuse and are
+    found via the include path - swap.h includes them with quotes, which falls
+    back to /I after the submodule directory misses.
+
+    They cannot silently go stale: the submodule is pinned by gitlink, so
+    squashfs_fs.h only changes if someone deliberately bumps squashfuse. See the
+    README before doing that.
+  -->
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
