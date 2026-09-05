@@ -172,7 +172,8 @@ void __stdcall FsSetDefaultParams(FsDefaultParamStruct *dps)
     wcsncpy_s(g_ini_path_w, MAX_PATH, ini, _TRUNCATE);
     tcl_logf(L"tclwext4: settings file is %s", g_ini_path_w);
 
-    g_global_ro = GetPrivateProfileIntW(L"tclwext4", L"readonly", 0, ini) != 0;
+    g_global_ro  = GetPrivateProfileIntW(L"tclwext4", L"readonly", 0, ini) != 0;
+    g_debug_log  = GetPrivateProfileIntW(L"tclwext4", L"debuglog", 0, ini) != 0;
 
     g_image_count = 0;
     for (i = 0; i < TCL_MAX_IMAGES; i++) {
@@ -863,7 +864,7 @@ int __stdcall FsExecuteFileW(HWND MainWin, WCHAR *RemoteName, WCHAR *Verb)
         ZeroMemory(&ofn, sizeof(ofn));
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner   = MainWin;
-        ofn.lpstrFilter = L"Disk images\0*.img;*.raw;*.bin;*.dd\0All files\0*.*\0\0";
+        ofn.lpstrFilter = L"Disk and filesystem images\0*.img;*.raw;*.bin;*.dd;*.squashfs;*.sfs;*.snap\0All files\0*.*\0\0";
         ofn.lpstrFile   = file;
         ofn.nMaxFile    = MAX_PATH;
         ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;

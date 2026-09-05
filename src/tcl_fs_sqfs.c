@@ -83,6 +83,18 @@ int tcl_sqfs_mount(tcl_volume *v)
                  err == SQFS_BADVERSION ? L"unsupported squashfs version" :
                  err == SQFS_BADCOMP    ? L"unsupported compression" :
                  err == SQFS_UNSUP      ? L"unsupported feature" : L"error");
+        /*
+         * The scan already vetted the compression id, so BADCOMP here means the
+         * codec we advertised is not actually registered in squashfuse's table.
+         * For xz that points at one specific thing: the shadowed
+         * win_decompress.c.inc is no longer being picked up - see the comment at
+         * the top of config/squashfuse/win_decompress.c.inc.
+         */
+        if (err == SQFS_BADCOMP)
+            tcl_logf(L"tclwext4: %s was detected as a supported codec but "
+                     L"squashfuse has no decompressor for it - check the include "
+                     L"order for config/squashfuse (see win_decompress.c.inc)",
+                     v->part.label);
         return (err == SQFS_BADCOMP) ? ENOTSUP : EIO;
     }
 
@@ -238,7 +250,7 @@ bool tcl_sqfs_resolve_u8(tcl_volume *v, const char *rel, sqfs_inode *out)
             if (!cur[0])
                 break;                      /* normalised back to the root */
             if (sqfs_lookup_path(fs, out, cur, &found) != SQFS_OK || !found) {
-                tcl_logf(L"tclwext4: sqfs: lookup failed for '%S' (depth %d)", cur, depth);
+                tcl_dbgf(L"tclwext4: sqfs: lookup failed for '%S' (depth %d)", cur, depth);
                 return false;
             }
             if (!S_ISLNK(sqfs_mode(out->base.inode_type)))
@@ -259,16 +271,16 @@ bool tcl_sqfs_resolve_u8(tcl_volume *v, const char *rel, sqfs_inode *out)
              */
             tn = 0;
             if (sqfs_readlink(fs, out, NULL, &tn) != SQFS_OK) {
-                tcl_logf(L"tclwext4: sqfs: readlink size query failed for '%S'", cur);
+                tcl_dbgf(L"tclwext4: sqfs: readlink size query failed for '%S'", cur);
                 return false;
             }
             if (tn == 0 || tn > sizeof(target)) {
-                tcl_logf(L"tclwext4: sqfs: implausible link length %zu for '%S' "
+                tcl_dbgf(L"tclwext4: sqfs: implausible link length %zu for '%S' "
                          L"(inode symlink_size looks wrong)", tn, cur);
                 return false;
             }
             if (sqfs_readlink(fs, out, target, &tn) != SQFS_OK) {
-                tcl_logf(L"tclwext4: sqfs: readlink failed for '%S'", cur);
+                tcl_dbgf(L"tclwext4: sqfs: readlink failed for '%S'", cur);
                 return false;
             }
             target[tn - 1] = 0;     /* never trust the library's terminator */
@@ -287,7 +299,7 @@ bool tcl_sqfs_resolve_u8(tcl_volume *v, const char *rel, sqfs_inode *out)
                 strcat_s(cur, sizeof(cur), target);
             }
             sqfs_norm(cur);
-            tcl_logf(L"tclwext4: sqfs: link '%S' (len %zu) -> '%S'",
+            tcl_dbgf(L"tclwext4: sqfs: link '%S' (len %zu) -> '%S'",
                      seg_dbg, tn - 1, cur);
         }
     }

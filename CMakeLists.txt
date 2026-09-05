@@ -10,6 +10,8 @@ set(LWEXT4_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/lwext4)
 set(FATFS_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/external/fatfs)
 set(SQFS_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/external/squashfuse)
 set(LZ4_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/external/lz4)
+set(ZSTD_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/external/zstd)
+set(XZ_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/external/xz-embedded)
 if(NOT EXISTS ${LWEXT4_DIR}/src/ext4.c)
     find_package(Git QUIET)
     if(NOT GIT_FOUND)
@@ -80,6 +82,10 @@ tcl_need_submodule("${SQFS_DIR}" "${SQFS_DIR}/fs.c"
                    "https://github.com/vasi/squashfuse.git" "squashfuse")
 tcl_need_submodule("${LZ4_DIR}"  "${LZ4_DIR}/lib/lz4.c"
                    "https://github.com/lz4/lz4.git" "lz4")
+tcl_need_submodule("${ZSTD_DIR}" "${ZSTD_DIR}/lib/decompress/zstd_decompress.c"
+                   "https://github.com/facebook/zstd.git" "zstd")
+tcl_need_submodule("${XZ_DIR}"   "${XZ_DIR}/linux/lib/xz/xz_dec_stream.c"
+                   "https://github.com/tukaani-project/xz-embedded.git" "xz-embedded")
 if(NOT EXISTS ${LWEXT4_DIR}/src/ext4.c)
     message(FATAL_ERROR "Could not obtain lwext4 at ${LWEXT4_DIR}")
 endif()
@@ -163,6 +169,54 @@ target_compile_options(lz4 PRIVATE /wd4244 /wd4267 /wd4996)
 set_property(TARGET lz4 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # ---------------------------------------------------------------------------
+# zstd, decoder only
+#
+# squashfuse calls ZSTD_decompress and nothing else, so the compressor,
+# dictionary builder and CLI are all left out. huf_decompress_amd64.S is
+# deliberately absent: that path needs GNU as, and MSVC takes the C fallback.
+# ---------------------------------------------------------------------------
+add_library(zstddec STATIC
+    ${ZSTD_DIR}/lib/common/debug.c
+    ${ZSTD_DIR}/lib/common/entropy_common.c
+    ${ZSTD_DIR}/lib/common/error_private.c
+    ${ZSTD_DIR}/lib/common/fse_decompress.c
+    ${ZSTD_DIR}/lib/common/pool.c
+    ${ZSTD_DIR}/lib/common/threading.c
+    ${ZSTD_DIR}/lib/common/xxhash.c
+    ${ZSTD_DIR}/lib/common/zstd_common.c
+    ${ZSTD_DIR}/lib/decompress/huf_decompress.c
+    ${ZSTD_DIR}/lib/decompress/zstd_ddict.c
+    ${ZSTD_DIR}/lib/decompress/zstd_decompress.c
+    ${ZSTD_DIR}/lib/decompress/zstd_decompress_block.c
+)
+target_include_directories(zstddec PUBLIC ${ZSTD_DIR}/lib ${ZSTD_DIR}/lib/common)
+target_compile_definitions(zstddec PUBLIC
+    ZSTD_DISABLE_ASM ZSTD_MULTITHREAD=0 _CRT_SECURE_NO_WARNINGS)
+target_compile_options(zstddec PRIVATE /wd4244 /wd4267 /wd4996 /wd4146)
+set_property(TARGET zstddec PROPERTY C_STANDARD 11)
+set_property(TARGET zstddec PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# ---------------------------------------------------------------------------
+# XZ Embedded: a minimal .xz decoder, configured through config/xzemb.
+# xz_dec_syms.c is kernel symbol exports and is deliberately absent.
+# ---------------------------------------------------------------------------
+add_library(xzdec STATIC
+    ${XZ_DIR}/linux/lib/xz/xz_dec_stream.c
+    ${XZ_DIR}/linux/lib/xz/xz_dec_lzma2.c
+    ${XZ_DIR}/linux/lib/xz/xz_dec_bcj.c
+    ${XZ_DIR}/linux/lib/xz/xz_crc32.c
+    ${XZ_DIR}/linux/lib/xz/xz_crc64.c
+)
+target_include_directories(xzdec PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/config/xzemb
+    ${XZ_DIR}/linux/include/linux
+    ${XZ_DIR}/linux/lib/xz)
+target_compile_definitions(xzdec PUBLIC _CRT_SECURE_NO_WARNINGS)
+target_compile_options(xzdec PRIVATE /wd4244 /wd4267 /wd4996)
+set_property(TARGET xzdec PROPERTY C_STANDARD 11)
+set_property(TARGET xzdec PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# ---------------------------------------------------------------------------
 # squashfuse
 #
 # Only the non-FUSE core. squashfuse already carries Windows support
@@ -179,12 +233,15 @@ add_library(squashfuse STATIC
 # swap.h.inc / swap.c.inc are generated upstream by a sed script; pre-generated
 # copies live in config/squashfuse. swap.h includes them with quotes, which
 # falls back to the include path after the submodule directory misses.
+# config/squashfuse comes FIRST: it shadows win_decompress.c.inc to add the xz
+# decompressor. See the comment at the top of that file.
 target_include_directories(squashfuse PUBLIC
-    ${SQFS_DIR}/win ${SQFS_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/config/squashfuse)
+    ${CMAKE_CURRENT_SOURCE_DIR}/config/squashfuse ${SQFS_DIR}/win ${SQFS_DIR})
 
-target_compile_definitions(squashfuse PUBLIC HAVE_LZ4_H _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(squashfuse PUBLIC
+    HAVE_LZ4_H HAVE_ZSTD_H TCLWEXT4_WITH_XZ _CRT_SECURE_NO_WARNINGS)
 target_compile_options(squashfuse PRIVATE /wd4244 /wd4267 /wd4996 /wd4005)
-target_link_libraries(squashfuse PUBLIC lz4)
+target_link_libraries(squashfuse PUBLIC lz4 zstddec xzdec)
 set_property(TARGET squashfuse PROPERTY C_STANDARD 11)
 set_property(TARGET squashfuse PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 

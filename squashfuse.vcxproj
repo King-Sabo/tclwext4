@@ -34,9 +34,9 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <LanguageStandard_C>stdc11</LanguageStandard_C>
-      <AdditionalIncludeDirectories>$(SqfsDir)\win;$(SqfsDir);$(ProjectDir)config\squashfuse;$(Lz4Dir)\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>HAVE_LZ4_H;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <DisableSpecificWarnings>4244;4267;4996;4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <AdditionalIncludeDirectories>$(ProjectDir)config\squashfuse;$(SqfsDir)\win;$(SqfsDir);$(ProjectDir)config\xzemb;$(XzDir)\linux\include\linux;$(XzDir)\linux\lib\xz;$(Lz4Dir)\lib;$(ZstdDir)\lib;$(ZstdDir)\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_LZ4_H;HAVE_ZSTD_H;TCLWEXT4_WITH_XZ;ZSTD_DISABLE_ASM;ZSTD_MULTITHREAD=0;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;4005;4146;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <WarningLevel>Level3</WarningLevel>
       <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
@@ -49,6 +49,8 @@
   <PropertyGroup>
     <SqfsDir>$(ProjectDir)external\squashfuse</SqfsDir>
     <Lz4Dir>$(ProjectDir)external\lz4</Lz4Dir>
+    <ZstdDir>$(ProjectDir)external\zstd</ZstdDir>
+    <XzDir>$(ProjectDir)external\xz-embedded</XzDir>
   </PropertyGroup>
 
   <!--
@@ -57,8 +59,8 @@
     so a direct clone is the fallback.
   -->
   <Target Name="FetchSqfs" BeforeTargets="PrepareForBuild"
-          Condition="!Exists('$(SqfsDir)\fs.c') Or !Exists('$(Lz4Dir)\lib\lz4.c')">
-    <Message Importance="high" Text="squashfuse / lz4 not present - fetching..." />
+          Condition="!Exists('$(SqfsDir)\fs.c') Or !Exists('$(Lz4Dir)\lib\lz4.c') Or !Exists('$(ZstdDir)\lib\decompress\zstd_decompress.c') Or !Exists('$(XzDir)\linux\lib\xz\xz_dec_stream.c')">
+    <Message Importance="high" Text="squashfuse / lz4 / zstd / xz-embedded not present - fetching..." />
     <Exec Condition="Exists('$(ProjectDir).git')"
           Command="git submodule update --init --recursive"
           WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
@@ -69,7 +71,15 @@
           Command="git clone --depth 1 https://github.com/lz4/lz4.git &quot;$(Lz4Dir)&quot;"
           WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
     <Error Condition="!Exists('$(SqfsDir)\fs.c')"  Text="Could not obtain squashfuse at $(SqfsDir)." />
+    <Exec Condition="!Exists('$(ZstdDir)\lib\decompress\zstd_decompress.c')"
+          Command="git clone --depth 1 https://github.com/facebook/zstd.git &quot;$(ZstdDir)&quot;"
+          WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
     <Error Condition="!Exists('$(Lz4Dir)\lib\lz4.c')" Text="Could not obtain lz4 at $(Lz4Dir)." />
+    <Exec Condition="!Exists('$(XzDir)\linux\lib\xz\xz_dec_stream.c')"
+          Command="git clone --depth 1 https://github.com/tukaani-project/xz-embedded.git &quot;$(XzDir)&quot;"
+          WorkingDirectory="$(ProjectDir)" ContinueOnError="true" />
+    <Error Condition="!Exists('$(ZstdDir)\lib\decompress\zstd_decompress.c')" Text="Could not obtain zstd at $(ZstdDir)." />
+    <Error Condition="!Exists('$(XzDir)\linux\lib\xz\xz_dec_stream.c')" Text="Could not obtain xz-embedded at $(XzDir)." />
   </Target>
 
   <!--
@@ -100,6 +110,33 @@
     <ClCompile Include="external\squashfuse\nonstd-stat.c" />
     <ClCompile Include="external\squashfuse\win\tinfl.c" />
     <ClCompile Include="external\lz4\lib\lz4.c" />
+    <!--
+      zstd, decoder only: squashfuse calls ZSTD_decompress and nothing else.
+      huf_decompress_amd64.S is deliberately absent - that path needs GNU as,
+      and ZSTD_DISABLE_ASM selects the C fallback MSVC can build.
+    -->
+    <ClCompile Include="external\zstd\lib\common\debug.c" />
+    <ClCompile Include="external\zstd\lib\common\entropy_common.c" />
+    <ClCompile Include="external\zstd\lib\common\error_private.c" />
+    <ClCompile Include="external\zstd\lib\common\fse_decompress.c" />
+    <ClCompile Include="external\zstd\lib\common\pool.c" />
+    <ClCompile Include="external\zstd\lib\common\threading.c" />
+    <ClCompile Include="external\zstd\lib\common\xxhash.c" />
+    <ClCompile Include="external\zstd\lib\common\zstd_common.c" />
+    <ClCompile Include="external\zstd\lib\decompress\huf_decompress.c" />
+    <ClCompile Include="external\zstd\lib\decompress\zstd_ddict.c" />
+    <ClCompile Include="external\zstd\lib\decompress\zstd_decompress.c" />
+    <ClCompile Include="external\zstd\lib\decompress\zstd_decompress_block.c" />
+    <!--
+      XZ Embedded: a minimal .xz decoder. Configured through
+      config\xzemb\xz_config.h, the same shape as FatFs's ffconf.h. xz_dec_syms.c
+      is kernel symbol exports and is deliberately absent.
+    -->
+    <ClCompile Include="external\xz-embedded\linux\lib\xz\xz_dec_stream.c" />
+    <ClCompile Include="external\xz-embedded\linux\lib\xz\xz_dec_lzma2.c" />
+    <ClCompile Include="external\xz-embedded\linux\lib\xz\xz_dec_bcj.c" />
+    <ClCompile Include="external\xz-embedded\linux\lib\xz\xz_crc32.c" />
+    <ClCompile Include="external\xz-embedded\linux\lib\xz\xz_crc64.c" />
   </ItemGroup>
 
   <!--

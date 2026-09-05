@@ -70,9 +70,11 @@ mounted at a time.
 |---|---|---|
 | squashfuse (non-FUSE core) | https://github.com/vasi/squashfuse | BSD-2-Clause |
 | lz4 (`lib/lz4.c` only) | https://github.com/lz4/lz4 | BSD-2-Clause |
-| zlib (inflate only) | https://github.com/madler/zlib | zlib License |
+| zstd (decoder only) | https://github.com/facebook/zstd | BSD-3-Clause / GPL-2.0 dual |
+| XZ Embedded (decoder only) | https://github.com/tukaani-project/xz-embedded | 0BSD |
+| tinfl (`win/tinfl.c`, bundled in squashfuse) | miniz, Rich Geldreich | public domain |
 
-All three are permissive and GPL-compatible, and none changes tclwext4's
+All are permissive and GPL-compatible, and none changes tclwext4's
 GPL-2.0-or-later status. Only their copyright notices must be retained.
 
 `squashfs_fs.h` inside squashfuse is copyright Phillip Lougher, distributed

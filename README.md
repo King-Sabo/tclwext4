@@ -3,7 +3,7 @@
 Total Commander WFX file system plugin giving access from Windows to:
 
 - **ext2/3/4** — read/write, on disks, USB sticks and images
-- **SquashFS** — read-only, anywhere (gzip and lz4 compression)
+- **SquashFS** — read-only, anywhere (gzip, xz, lz4 and zstd compression)
 - **FAT12/16/32** — read/write, inside images only
 
 Unmodified upstream libraries do the filesystem work:
@@ -136,7 +136,7 @@ empty and the archive is not complete corresponding source. Attach an archive bu
 
 ## Build
 
-There are two submodules:
+There are six submodules — three filesystem readers and three decompressors:
 
 | Path | Upstream | Provides |
 |---|---|---|
@@ -144,13 +144,17 @@ There are two submodules:
 | `external/fatfs` | [FatFs](http://elm-chan.org/fsw/ff/), via the [abbrev/fatfs](https://github.com/abbrev/fatfs) mirror | FAT12/16/32, exFAT |
 | `external/squashfuse` | [vasi/squashfuse](https://github.com/vasi/squashfuse) | SquashFS 4.0 reader |
 | `external/lz4` | [lz4/lz4](https://github.com/lz4/lz4) | lz4 decompression |
+| `external/zstd` | [facebook/zstd](https://github.com/facebook/zstd) | zstd decompression |
+| `external/xz-embedded` | [tukaani-project/xz-embedded](https://github.com/tukaani-project/xz-embedded) | xz decompression |
 
 `git submodule update --init --recursive` runs automatically as a pre-build step
-when either is empty, so a fresh clone builds without setup — `FetchLwext4` in
-`lwext4.vcxproj` and `FetchFatFs` in `fatfs.vcxproj`, and the equivalent at
-configure time under CMake. Each falls back to a direct `git clone` if the
-submodule update is a no-op, which happens when `.gitmodules` lists a path with
-no gitlink in the index. Both need `git` on PATH.
+whenever any of them is missing, so a fresh clone builds without setup:
+`FetchLwext4` in `lwext4.vcxproj`, `FetchFatFs` in `fatfs.vcxproj`, `FetchSqfs`
+in `squashfuse.vcxproj` (which covers squashfuse, lz4 and zstd), and the
+equivalent at configure time under CMake. Each falls back to a direct
+`git clone` if the submodule update turns out to be a no-op, which happens when
+`.gitmodules` lists a path with no gitlink in the index. All need `git` on
+PATH.
 
 Open `tclwext4.sln` in Visual Studio 2022 and build Release for x64 and Win32,
 or from a developer prompt:
@@ -170,10 +174,16 @@ cmake --preset vs2022-x86 && cmake --build --preset x86-release
 Produces `tclwext4.wfx64` and `tclwext4.wfx`. Put both in one directory and
 point Total Commander at either; TC picks the matching bitness itself.
 
-Both submodules are compiled into their own static library targets rather than
-via their upstream build files, and **neither submodule is ever patched**. How
-each is configured differs, and the difference is worth knowing before touching
-either.
+Every submodule is compiled into its own static library target rather than via
+its upstream build files, and **no submodule is ever patched**. Each of the
+three filesystem libraries needs configuring a different way, and the
+differences are worth knowing before touching any of them:
+
+| Library | How it is configured |
+|---|---|
+| lwext4 | `config/generated/ext4_config.h`, found through its `#ifndef`-guarded include hook |
+| FatFs | sources staged into `build/fatfs/` with our `config/ffconf.h` beside them |
+| squashfuse | pre-generated `config/squashfuse/swap.*.inc`, plus `HAVE_*_H` defines for the codecs |
 
 ### lwext4 configuration
 
@@ -187,7 +197,8 @@ lwext4's own `include/ext4_config.h` begins with
 ```
 
 which is its documented hook for an external configuration. `config/` is on the
-include path of both projects, `CONFIG_USE_DEFAULT_CFG` is left at 0, and
+include path of the lwext4 and plugin projects, `CONFIG_USE_DEFAULT_CFG` is left
+at 0, and
 lwext4's `include/` has no `generated/` subdirectory of its own, so the include
 resolves to ours unambiguously. Everything the header does not define keeps
 upstream's default, since each knob in `ext4_config.h` is `#ifndef`-guarded.
@@ -311,35 +322,52 @@ plugin never writes, there would be nothing to race about regardless. A bare
 `.squashfs` or `.sfs` file added through `[add image...]` works too, via the
 same no-partition-table fallback that handles dd-style images.
 
-**Compression: gzip and lz4 only.** SquashFS supports six codecs; this build
-handles two. gzip needs no external library — squashfuse includes
+**Compression: gzip, xz, lz4 and zstd.** SquashFS supports six codecs; this
+build handles four. gzip needs no external library — squashfuse includes
 `win/win_decompress.c.inc` unconditionally on `_WIN32`, implementing the gzip
 decompressor over the bundled tinfl (`win/tinfl.c`). Linking real zlib as well
-duplicates `sqfs_decompressor_zlib`, so `HAVE_ZLIB_H` must stay undefined. lz4
-is the only decompressor submodule. The compression id is checked during the *scan*, not at mount, so an
-image built with xz, zstd or lzo appears in the listing with its `Status` column
-reading `unsupported: xz` rather than mounting and then failing on the first
-read. Adding a codec is a matter of another decompressor library plus its
-`HAVE_*_H` define — liblzma is the awkward one, being autotools-oriented.
+duplicates `sqfs_decompressor_zlib`, so `HAVE_ZLIB_H` must stay undefined. lz4,
+zstd and xz come from submodules; zstd is built decoder-only, twelve files with
+`ZSTD_DISABLE_ASM` so MSVC takes the C path instead of the GNU-as-only
+`huf_decompress_amd64.S`.
 
-**One generated file pair.** squashfuse derives its byte-swapping functions
-from the structs in `squashfs_fs.h` using `gen_swap.sh`, a sed script run by its
-autotools build. An MSVC build has no sed, so pre-generated `swap.h.inc` and
-`swap.c.inc` are committed in `config/squashfuse/` and picked up via the include
-path — `swap.h` includes them with quotes, which falls back to `/I` after the
-submodule directory misses. **Nothing needs regenerating to build this repo:
-clone, open the solution, build.**
+### How xz support is wired in
 
-They can only diverge if someone bumps the squashfuse submodule to a commit
-whose `squashfs_fs.h` differs, which the gitlink makes a deliberate act rather
-than an accident. `src/tcl_fs_sqfs.c` carries `_STATIC_ASSERT`s on the two key
-structure sizes so that divergence fails at compile time rather than silently
-mis-decoding. To regenerate after a deliberate bump, from git-bash or WSL:
+xz is the one codec squashfuse cannot simply be handed a library for, because it
+selects decompressors through a **static table in `decompress.c` with no
+registration hook** — and the library it expects, liblzma, is 84 sources plus a
+generated config header, which is a poor fit for a build that must work from a
+clean clone in Visual Studio alone.
 
-```
-cd external/squashfuse && sh gen_swap.sh squashfs_fs.h
-mv swap.h.inc swap.c.inc ../../config/squashfuse/
-```
+Instead the decoder is [XZ Embedded](https://github.com/tukaani-project/xz-embedded),
+five files with no build system, configured through `config/xzemb/xz_config.h`
+in the same way FatFs is configured through `config/ffconf.h`. Its API is
+nothing like liblzma's, so about sixty lines of glue live in
+**`config/squashfuse/win_decompress.c.inc`**, which shadows squashfuse's file of
+the same name and adds `sqfs_decompressor_xz` alongside the gzip one.
+
+The shadow works because `decompress.c` writes `#include "win_decompress.c.inc"`
+*without* a `win/` prefix, so the quoted include misses the submodule's own
+directory and falls through to the include path — where `config/squashfuse`
+is listed first. Our copy pulls in the original explicitly.
+
+**This is the most fragile arrangement in the project.** If upstream ever adds
+the `win/` prefix, the shadow is silently bypassed and xz support disappears
+with no build error. The symptom is an xz image failing to mount with
+"unsupported compression" after the scan advertised xz as supported;
+`tcl_sqfs_mount()` logs a pointer to this arrangement when it sees exactly that
+combination. Read the comment at the top of the file before bumping squashfuse.
+
+`XZ_DEC_SINGLE` is used because squashfuse hands over a whole compressed block
+and a whole output buffer at once, and BCJ filters (`XZ_DEC_X86` and the ARM
+variants) are built in because `mksquashfs -Xbcj x86` is common on appliance
+images — a stream using a filter that was not built fails to decode rather than
+degrading.
+
+Still missing is **lzo**, which would be easy (`minilzo.c` is a single file
+exporting exactly the `lzo1x_decompress_safe` that squashfuse calls, plus a
+three-line shim header so `<lzo/lzo1x.h>` resolves) but is rare enough in
+practice not to have been worth adding.
 
 Otherwise squashfuse needed no porting work: it ships `win/win32.h` with
 `typedef HANDLE sqfs_fd_t`, and `sqfs_init(fs, fd, offset)` takes a byte offset,
@@ -527,7 +555,7 @@ startup scan, before TC has supplied a log callback.
   through the same lock.
 - Write-back caching (ext only) is enabled for multi-file operations and flushed
   at the end of each file, so an abort costs at most the file in flight.
-- SquashFS is read-only, gzip and lz4 only, and version 4.0 only.
+- SquashFS is read-only, gzip/xz/lz4/zstd only (no lzo), and version 4.0 only.
 - FAT is not offered on physical disks, deliberately — see FAT support.
 - No extension association: the plugin is reachable through Network
   Neighborhood or an explicit `cd`, because extension association belongs to

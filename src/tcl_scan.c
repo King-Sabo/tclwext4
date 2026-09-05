@@ -198,7 +198,7 @@ bool tcl_probe_fat(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_par
     /* A boot jump is conventional but not universal: some images are built by
        copying a filesystem without one. Warn rather than reject. */
     if (bs[0] != 0xEB && bs[0] != 0xE9 && bs[0] != 0x49)
-        tcl_logf(L"tclwext4: scan: partition at %llu has no boot jump (0x%02X), continuing",
+        tcl_dbgf(L"tclwext4: scan: partition at %llu has no boot jump (0x%02X), continuing",
                  (unsigned long long)off, bs[0]);
 
     if (bytes_per_sec != 512 && bytes_per_sec != 1024 &&
@@ -261,7 +261,7 @@ bool tcl_probe_fat(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_par
 
 reject:
     if (looks_fatty)
-        tcl_logf(L"tclwext4: scan: partition at %llu is not usable FAT: %s",
+        tcl_dbgf(L"tclwext4: scan: partition at %llu is not usable FAT: %s",
                  (unsigned long long)off, why);
     return false;
 }
@@ -321,7 +321,8 @@ bool tcl_probe_sqfs(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_pa
     }
 
     /* Only the codecs actually linked in. */
-    supported = (comp == 1 /* gzip */ || comp == 5 /* lz4 */);
+    supported = (comp == 1 /* gzip */ || comp == 4 /* xz   */ ||
+                 comp == 5 /* lz4  */ || comp == 6 /* zstd */);
 
     p->offset     = off;
     p->size       = size;
@@ -338,7 +339,7 @@ bool tcl_probe_sqfs(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_pa
         swprintf_s(p->ro_reason, _countof(p->ro_reason),
                    L"unsupported compression: %s", sqfs_comp_name(comp));
         tcl_logf(L"tclwext4: scan: SquashFS at %llu uses %s compression, "
-                 L"which this build does not include (gzip and lz4 only)",
+                 L"which this build does not include (gzip, xz, lz4 and zstd only)",
                  (unsigned long long)off, sqfs_comp_name(comp));
     } else {
         tcl_logf(L"tclwext4: scan: SquashFS 4.%u at %llu, %s, %llu bytes used",
@@ -368,7 +369,7 @@ static void add_part(tcl_part *out, int max, int *n, HANDLE h,
     } else if (kind == TCL_SRC_IMAGE && tcl_probe_fat(h, off, size, sect, &p)) {
         /* images only - deliberately not attempted on physical disks */
     } else {
-        tcl_logf(L"tclwext4: scan: skipping partition %d at %llu (%llu bytes) - "
+        tcl_dbgf(L"tclwext4: scan: skipping partition %d at %llu (%llu bytes) - "
                  L"no recognised filesystem%s",
                  part_no, (unsigned long long)off, (unsigned long long)size,
                  kind == TCL_SRC_DISK ? L" (FAT not attempted on physical disks)" : L"");
