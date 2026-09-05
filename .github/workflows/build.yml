@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# Action versions are pinned to the first major that declares
+# runs.using: node24. The version number is not a reliable proxy for the
+# runtime - upload-artifact@v5 still ran on Node 20, and v6 was the first Node
+# 24 major. Check the upstream action.yml rather than assuming when bumping:
+#   curl -s https://raw.githubusercontent.com/<owner>/<repo>/<tag>/action.yml \
+#     | grep using:
+
 jobs:
   msbuild:
     name: ${{ matrix.platform }} ${{ matrix.configuration }}
@@ -20,11 +27,11 @@ jobs:
         configuration: [ Debug, Release ]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
 
       # No /warnaserror: it would apply to the lwext4 submodule as well, and
       # upstream is not warning-clean under MSVC /W3. Scope it to tclwext4's own
@@ -49,7 +56,7 @@ jobs:
       # exist so a contributor can confirm their change compiles - see the
       # "No binary releases" section of README.md.
       - name: Upload build output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: unsigned-ci-build-${{ matrix.platform }}-${{ matrix.configuration }}
           path: build/${{ matrix.platform }}/${{ matrix.configuration }}/tclwext4.wfx*
@@ -60,7 +67,7 @@ jobs:
     name: cmake x64 Release
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -117,7 +124,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cmake-ci-logs
           path: ci-logs/
@@ -132,11 +139,11 @@ jobs:
     name: submodule bootstrap
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: false
 
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
 
       - name: Confirm lwext4 is absent before building
         shell: pwsh
