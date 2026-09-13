@@ -419,8 +419,29 @@ fields from the `tclwext4` plugin.
 | Features | raw `compat` / `incompat` / `ro_compat` words |
 | Backing store | `\\.\PhysicalDriveN` or image path |
 
-Fields are populated for the root-level volume entries only; rows inside a
-volume report empty.
+Volume fields are populated for root-level entries only; the Unix fields only
+for rows inside a volume.
+
+Three things worth knowing about the Unix fields:
+
+- **FAT reports `n/a`**, not blank. FAT has no Unix metadata at all, and an
+  empty cell would read as "not known yet" — a different claim.
+- **They cost an inode read per row**, so under `CONTENT_DELAYIFSLOW` they
+  return `ft_delayed` and TC fetches them on its background thread. The panel
+  stays responsive and the cells fill in.
+- **Symlinks report their own metadata, not the target's.** Path resolution
+  follows symlinks everywhere else in the plugin, so these two fields use
+  deliberately non-following lookups (`ext_path_raw`,
+  `tcl_sqfs_lookup_nofollow`). Otherwise a symlink row would show the target's
+  permissions and an empty link target.
+
+uid and gid are numeric. Resolving them to names would mean parsing
+`/etc/passwd` inside the volume, which is right for a root filesystem image and
+wrong for anything else, so it is not done.
+
+On SquashFS, uid/gid are stored as indices into a shared id table rather than as
+values, and are resolved through `sqfs_id_get()` — reading the inode fields
+directly would yield plausible but wrong small integers.
 
 ## Volumes: unmounting, identifying, inspecting
 

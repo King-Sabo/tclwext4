@@ -45,6 +45,7 @@ struct tcl_dirh {
 /* from tcl_fs_sqfs.c */
 sqfs *tcl_sqfs_of(tcl_volume *v);
 bool  tcl_sqfs_lookup(tcl_volume *v, const wchar_t *rel, sqfs_inode *out);
+bool  tcl_sqfs_lookup_nofollow(tcl_volume *v, const wchar_t *rel, sqfs_inode *out);
 bool  tcl_sqfs_resolve_u8(tcl_volume *v, const char *rel, sqfs_inode *out);
 void  tcl_sqfs_fill(tcl_volume *v, sqfs_inode *ino, tcl_dirent *out);
 int   tcl_sqfs_statfs(tcl_volume *v, uint64_t *total, uint64_t *freebytes);
@@ -90,6 +91,26 @@ tcl_volume *tcl_fs_resolve(const wchar_t *tc_path, const wchar_t **rel)
     if (tcl_fs_mount(v) != EOK)
         return NULL;
     return v;
+}
+
+/* Volume-relative tail -> lwext4 path, WITHOUT symlink resolution. */
+static bool ext_path_raw(tcl_volume *v, const wchar_t *rel, char *out, size_t n)
+{
+    char *u8;
+    size_t i;
+
+    strcpy_s(out, n, v->mp);
+    if (rel && *rel) {
+        u8 = tcl_w_to_u8(rel);
+        if (!u8)
+            return false;
+        for (i = 0; u8[i]; i++)
+            if (u8[i] == '\\')
+                u8[i] = '/';
+        strcat_s(out, n, u8);
+        LocalFree(u8);
+    }
+    return true;
 }
 
 /* Build the lwext4 path for a volume-relative tail, following symlinks. */
@@ -353,17 +374,17 @@ bool tcl_fs_readdir(tcl_dirh *d, tcl_dirent *out)
             if (tcl_sqfs_resolve_u8(d->v, full, &tgt)) {
                 tcl_sqfs_fill(d->v, &tgt, out);
                 out->is_link = true;    /* keep the marker after refilling */
-                tcl_logf(L"tclwext4: sqfs: listed link '%S' -> %s, %llu bytes",
+                tcl_dbgf(L"tclwext4: sqfs: listed link '%S' -> %s, %llu bytes",
                          full, out->is_dir ? L"dir" : L"file",
                          (unsigned long long)out->size);
             } else {
-                tcl_logf(L"tclwext4: sqfs: could not resolve link '%S'", full);
+                tcl_dbgf(L"tclwext4: sqfs: could not resolve link '%S'", full);
             }
         } else if (sqfs_dentry_type(&entry) == SQUASHFS_SYMLINK_TYPE ||
                    sqfs_dentry_type(&entry) == SQUASHFS_LSYMLINK_TYPE) {
             /* The dentry says symlink but the inode mode did not. That would
                mean S_ISLNK/sqfs_mode disagree - worth knowing about. */
-            tcl_logf(L"tclwext4: sqfs: '%S' is a symlink by dentry type %d but "
+            tcl_dbgf(L"tclwext4: sqfs: '%S' is a symlink by dentry type %d but "
                      L"inode_type %d did not test as one",
                      sqfs_dentry_name(&entry), sqfs_dentry_type(&entry),
                      ino.base.inode_type);
@@ -488,6 +509,93 @@ int tcl_fs_stat(tcl_volume *v, const wchar_t *path, tcl_dirent *out)
         out->mtime  = ext4_inode_get_modif_time(&ino);
         out->atime  = ext4_inode_get_access_time(&ino);
         out->ctime  = ext4_inode_get_change_inode_time(&ino);
+        return EOK;
+    }
+}
+
+/*
+ * Unix metadata. Deliberately per-path rather than folded into tcl_dirent:
+ * it costs an inode read, and the content-column layer only asks for it on
+ * TC's background thread.
+ */
+int tcl_fs_unix(tcl_volume *v, const wchar_t *path, tcl_unix_info *out)
+{
+    const wchar_t *rel;
+    tcl_volume *vv = tcl_fs_resolve(path, &rel);
+
+    if (!vv || vv != v)
+        return ENOENT;
+    ZeroMemory(out, sizeof(*out));
+
+    if (v->fs == TCL_FS_FAT)
+        return ENOTSUP;             /* no Unix metadata exists on FAT */
+
+    if (v->fs == TCL_FS_SQFS) {
+        sqfs *fs = tcl_sqfs_of(v);
+        sqfs_inode ino;
+        sqfs_id_t id;
+
+        if (!fs || !tcl_sqfs_lookup_nofollow(v, rel, &ino))
+            return ENOENT;
+
+        out->mode  = ino.base.mode;
+        out->nlink = (uint32_t)ino.nlink;
+
+        /* uid/guid are indices into a shared id table, not values - reading
+           them directly yields plausible but wrong small integers. */
+        if (sqfs_id_get(fs, ino.base.uid, &id) == SQFS_OK)
+            out->uid = (uint32_t)id;
+        if (sqfs_id_get(fs, ino.base.guid, &id) == SQFS_OK)
+            out->gid = (uint32_t)id;
+
+        if (S_ISLNK(sqfs_mode(ino.base.inode_type))) {
+            char buf[512];
+            size_t n = 0;
+            out->is_link = true;
+            if (sqfs_readlink(fs, &ino, NULL, &n) == SQFS_OK &&
+                n > 0 && n <= sizeof(buf) &&
+                sqfs_readlink(fs, &ino, buf, &n) == SQFS_OK) {
+                wchar_t *w;
+                buf[n - 1] = 0;
+                w = tcl_u8_to_w(buf);
+                if (w) {
+                    wcsncpy_s(out->target, _countof(out->target), w, _TRUNCATE);
+                    LocalFree(w);
+                }
+            }
+        }
+        return EOK;
+    }
+
+    /* ext */
+    {
+        char p[768];
+        size_t n = 0;
+        char buf[512];
+
+        /*
+         * Built WITHOUT tcl_realpath: we want the link's own mode and owner,
+         * not the target's. lwext4 never resolves symlinks during path lookup,
+         * so these accessors then act on the link itself.
+         */
+        if (!ext_path_raw(v, rel, p, sizeof(p)))
+            return ENOENT;
+        if (ext4_mode_get(p, &out->mode) != EOK)
+            return ENOENT;
+        ext4_owner_get(p, &out->uid, &out->gid);
+
+        if ((out->mode & 0xF000) == 0xA000) {       /* S_IFLNK */
+            out->is_link = true;
+            if (ext4_readlink(p, buf, sizeof(buf) - 1, &n) == EOK) {
+                wchar_t *w;
+                buf[n] = 0;
+                w = tcl_u8_to_w(buf);
+                if (w) {
+                    wcsncpy_s(out->target, _countof(out->target), w, _TRUNCATE);
+                    LocalFree(w);
+                }
+            }
+        }
         return EOK;
     }
 }

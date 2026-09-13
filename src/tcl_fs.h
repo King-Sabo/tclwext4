@@ -48,6 +48,21 @@ bool      tcl_fs_readdir(tcl_dirh *d, tcl_dirent *out);
 void      tcl_fs_closedir(tcl_dirh *d);
 
 int  tcl_fs_stat(tcl_volume *v, const wchar_t *path, tcl_dirent *out);
+
+/*
+ * Unix metadata for one path. FAT has none of this, so tcl_fs_unix() returns
+ * ENOTSUP for a FAT volume and the caller reports "n/a" rather than blank -
+ * an empty column reads as "unknown", which is a different claim.
+ */
+typedef struct {
+    uint32_t mode;          /* st_mode bits, type included */
+    uint32_t uid, gid;
+    uint32_t nlink;         /* 0 when the backend cannot supply it */
+    bool     is_link;
+    wchar_t  target[512];   /* symlink target, empty otherwise */
+} tcl_unix_info;
+
+int  tcl_fs_unix(tcl_volume *v, const wchar_t *path, tcl_unix_info *out);
 int  tcl_fs_mkdir(tcl_volume *v, const wchar_t *path);
 int  tcl_fs_unlink(tcl_volume *v, const wchar_t *path);
 int  tcl_fs_rmdir(tcl_volume *v, const wchar_t *path);

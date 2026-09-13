@@ -306,6 +306,46 @@ bool tcl_sqfs_resolve_u8(tcl_volume *v, const char *rel, sqfs_inode *out)
     return true;
 }
 
+/*
+ * As tcl_sqfs_lookup(), but the FINAL component is not followed - the parent
+ * path still is. Needed for the Unix-metadata columns: a symlink row should
+ * report the link's own mode and owner, and its target, not the target's.
+ */
+bool tcl_sqfs_lookup_nofollow(tcl_volume *v, const wchar_t *rel, sqfs_inode *out)
+{
+    sqfs *fs = tcl_sqfs_of(v);
+    char *u8, *slash;
+    bool found = false, ok = false;
+
+    if (!fs)
+        return false;
+    if (!rel || !*rel)
+        return tcl_sqfs_resolve_u8(v, "", out);
+
+    u8 = tcl_w_to_u8(rel);
+    if (!u8)
+        return false;
+    for (char *c = u8; *c; c++)
+        if (*c == '\\')
+            *c = '/';
+
+    slash = strrchr(u8, '/');
+    if (slash) {
+        *slash = 0;
+        ok = tcl_sqfs_resolve_u8(v, u8, out);       /* parent: follows */
+        *slash = '/';
+        if (ok)
+            ok = (sqfs_lookup_path(fs, out, slash + 1, &found) == SQFS_OK) && found;
+    } else {
+        ok = tcl_sqfs_resolve_u8(v, "", out);
+        if (ok)
+            ok = (sqfs_lookup_path(fs, out, u8, &found) == SQFS_OK) && found;
+    }
+
+    LocalFree(u8);
+    return ok;
+}
+
 /* Wide-path wrapper: TC gives UTF-16 with backslashes. */
 bool tcl_sqfs_lookup(tcl_volume *v, const wchar_t *rel, sqfs_inode *out)
 {

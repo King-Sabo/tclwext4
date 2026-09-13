@@ -2,10 +2,18 @@
 /*
  * tcl_content.c - TC content plugin interface (custom columns).
  *
- * Fields apply to the root-level volume entries only, i.e. paths of the form
- * "\Disk1p1". Anything deeper reports ft_fieldempty: per-file ext attributes
- * (mode, uid/gid) would be useful too, but they need an inode read per row and
- * belong behind CONTENT_DELAYIFSLOW as a separate change.
+ * Two groups of fields.
+ *
+ * Volume fields (Status, Size, Free, ...) apply to root-level entries only,
+ * i.e. paths of the form "\Disk1p1", and report ft_fieldempty deeper down.
+ *
+ * Unix fields (Permissions, Mode, Owner, Group, Link target) apply to rows
+ * INSIDE a volume. They cost an inode read each, so under CONTENT_DELAYIFSLOW
+ * they return ft_delayed and TC re-asks from its background thread rather than
+ * stalling the panel.
+ *
+ * On FAT they report "n/a" rather than empty: FAT has no Unix metadata at all,
+ * and an empty cell would read as "not known yet", which is a different claim.
  *
  * "Free" is the only field that requires the volume to be mounted. When TC asks
  * with CONTENT_DELAYIFSLOW we return ft_delayed rather than mounting on the
@@ -27,6 +35,11 @@ enum {
     FLD_FREE,
     FLD_FEATURES,
     FLD_BACKING,
+    FLD_PERMS,
+    FLD_MODE,
+    FLD_OWNER,
+    FLD_GROUP,
+    FLD_LINKTGT,
     FLD_COUNT
 };
 
@@ -45,7 +58,41 @@ static const struct {
     { "Free",          "bytes", ft_numeric_64 },
     { "Features",      "",      ft_stringw    },
     { "Backing store", "",      ft_stringw    },
+    { "Permissions",   "",      ft_stringw    },
+    { "Mode",          "",      ft_stringw    },
+    { "Owner",         "",      ft_stringw    },
+    { "Group",         "",      ft_stringw    },
+    { "Link target",   "",      ft_stringw    },
 };
+
+#define FLD_FIRST_UNIX FLD_PERMS
+
+/* drwxr-xr-x, as ls would render it. */
+static void mode_to_string(uint32_t m, wchar_t *out, size_t n)
+{
+    static const wchar_t rwx[8][4] = {
+        L"---", L"--x", L"-w-", L"-wx", L"r--", L"r-x", L"rw-", L"rwx"
+    };
+    wchar_t t;
+
+    switch (m & 0xF000) {
+    case 0x4000: t = L'd'; break;
+    case 0xA000: t = L'l'; break;
+    case 0x2000: t = L'c'; break;
+    case 0x6000: t = L'b'; break;
+    case 0x1000: t = L'p'; break;
+    case 0xC000: t = L's'; break;
+    default:     t = L'-'; break;
+    }
+
+    swprintf_s(out, n, L"%c%s%s%s", t,
+               rwx[(m >> 6) & 7], rwx[(m >> 3) & 7], rwx[m & 7]);
+
+    /* setuid/setgid/sticky replace the matching execute bit, as in ls. */
+    if (m & 04000) out[3] = (m & 0100) ? L's' : L'S';
+    if (m & 02000) out[6] = (m & 0010) ? L's' : L'S';
+    if (m & 01000) out[9] = (m & 0001) ? L't' : L'T';
+}
 
 /*
  * Resolve a root-level volume entry. Returns NULL for the root itself and for
@@ -106,6 +153,68 @@ int __stdcall FsContentGetValueW(WCHAR *FileName, int FieldIndex, int UnitIndex,
     (void)UnitIndex;
     if (FieldIndex < 0 || FieldIndex >= FLD_COUNT)
         return ft_nosuchfield;
+
+    /*
+     * Unix fields work on rows inside a volume, so they are handled before the
+     * root_volume() gate that the volume fields sit behind.
+     */
+    if (FieldIndex >= FLD_FIRST_UNIX) {
+        const wchar_t *rel;
+        tcl_volume *uv;
+        tcl_unix_info ui;
+        int rc;
+
+        EnterCriticalSection(&g_ext4_cs);
+        uv = tcl_fs_resolve(FileName, &rel);
+        if (!uv || !*rel) {          /* the volume row itself has no mode */
+            LeaveCriticalSection(&g_ext4_cs);
+            return ft_fieldempty;
+        }
+        if (uv->fs == TCL_FS_FAT) {
+            LeaveCriticalSection(&g_ext4_cs);
+            put_w(FieldValue, maxlen, L"n/a");
+            return ft_stringw;
+        }
+        /* An inode read per row: let TC do it off the drawing thread. */
+        if (flags & CONTENT_DELAYIFSLOW) {
+            LeaveCriticalSection(&g_ext4_cs);
+            return ft_delayed;
+        }
+        rc = tcl_fs_unix(uv, FileName, &ui);
+        LeaveCriticalSection(&g_ext4_cs);
+
+        if (rc == ENOTSUP) {
+            put_w(FieldValue, maxlen, L"n/a");
+            return ft_stringw;
+        }
+        if (rc != EOK)
+            return ft_fieldempty;
+
+        switch (FieldIndex) {
+        case FLD_PERMS:
+            mode_to_string(ui.mode, buf, _countof(buf));
+            put_w(FieldValue, maxlen, buf);
+            return ft_stringw;
+        case FLD_MODE:
+            swprintf_s(buf, _countof(buf), L"%04o", ui.mode & 07777);
+            put_w(FieldValue, maxlen, buf);
+            return ft_stringw;
+        case FLD_OWNER:
+            swprintf_s(buf, _countof(buf), L"%u", ui.uid);
+            put_w(FieldValue, maxlen, buf);
+            return ft_stringw;
+        case FLD_GROUP:
+            swprintf_s(buf, _countof(buf), L"%u", ui.gid);
+            put_w(FieldValue, maxlen, buf);
+            return ft_stringw;
+        case FLD_LINKTGT:
+            if (!ui.is_link || !ui.target[0])
+                return ft_fieldempty;
+            put_w(FieldValue, maxlen, ui.target);
+            return ft_stringw;
+        }
+        return ft_nosuchfield;
+    }
 
     EnterCriticalSection(&g_ext4_cs);
     v = root_volume(FileName);

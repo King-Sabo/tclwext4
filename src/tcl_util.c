@@ -23,8 +23,9 @@ static void tcl_emit(const wchar_t *buf, bool to_debugger)
         OutputDebugStringW(buf);
         OutputDebugStringW(L"\r\n");
     }
+    /* tLogProcW takes a non-const WCHAR*; TC only reads it. */
     if (g_log_proc)
-        g_log_proc(g_plugin_nr, 3 /* msgtype_details */, buf);
+        g_log_proc(g_plugin_nr, 3 /* msgtype_details */, (WCHAR *)buf);
 }
 
 /*
