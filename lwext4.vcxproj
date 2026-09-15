@@ -13,6 +13,10 @@
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration><Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_RO|Win32"><Configuration>Debug_RO</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_RO|x64"><Configuration>Debug_RO</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release_RO|Win32"><Configuration>Release_RO</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release_RO|x64"><Configuration>Release_RO</Configuration><Platform>x64</Platform></ProjectConfiguration>
   </ItemGroup>
 
   <PropertyGroup Label="Globals">
@@ -32,9 +36,9 @@
     <PlatformToolset Condition="'$(PlatformToolset)'==''">v143</PlatformToolset>
     <PlatformToolset Condition="!Exists('$(VCTargetsPath)') And '$(DefaultPlatformToolset)'!=''">$(DefaultPlatformToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
-    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
-    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
-    <WholeProgramOptimization Condition="'$(Configuration)'=='Release'">false</WholeProgramOptimization>
+    <UseDebugLibraries Condition="$(Configuration.StartsWith('Debug'))">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="$(Configuration.StartsWith('Release'))">false</UseDebugLibraries>
+    <WholeProgramOptimization Condition="$(Configuration.StartsWith('Release'))">false</WholeProgramOptimization>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
@@ -63,12 +67,12 @@
       <!-- 4005: ext4_misc.h redefines offsetof over ucrt stddef.h -->
       <DisableSpecificWarnings>4244;4267;4996;4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <WarningLevel>Level3</WarningLevel>
-      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
-      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
-      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
-      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
-      <FunctionLevelLinking Condition="'$(Configuration)'=='Release'">true</FunctionLevelLinking>
-      <IntrinsicFunctions Condition="'$(Configuration)'=='Release'">true</IntrinsicFunctions>
+      <RuntimeLibrary Condition="$(Configuration.StartsWith('Debug'))">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="$(Configuration.StartsWith('Release'))">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="$(Configuration.StartsWith('Debug'))">Disabled</Optimization>
+      <Optimization Condition="$(Configuration.StartsWith('Release'))">MaxSpeed</Optimization>
+      <FunctionLevelLinking Condition="$(Configuration.StartsWith('Release'))">true</FunctionLevelLinking>
+      <IntrinsicFunctions Condition="$(Configuration.StartsWith('Release'))">true</IntrinsicFunctions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
   </ItemDefinitionGroup>

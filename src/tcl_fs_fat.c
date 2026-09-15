@@ -86,8 +86,20 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 
     if (!SetFilePointerEx(v->bdev.h, li, NULL, FILE_BEGIN))
         return RES_ERROR;
-    if (!WriteFile(v->bdev.h, buff, len, &put, NULL) || put != len)
+    if (!WriteFile(v->bdev.h, buff, len, &put, NULL) || put != len) {
+        DWORD err = GetLastError();
+        tcl_logf(L"tclwext4: FAT write at sector %llu failed: error %u%s",
+                 (unsigned long long)sector, err,
+                 err == ERROR_WRITE_PROTECT ? L" (media is write protected)" : L"");
+        if (err == ERROR_WRITE_PROTECT) {
+            /* Windows only refuses at the first write, never at open. Latch it
+               so the rest of the plugin treats the volume as read-only. */
+            v->bdev.writable = false;
+            v->read_only = true;
+            return RES_WRPRT;
+        }
         return RES_ERROR;
+    }
     return RES_OK;
 }
 

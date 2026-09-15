@@ -13,6 +13,10 @@
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration><Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_RO|Win32"><Configuration>Debug_RO</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_RO|x64"><Configuration>Debug_RO</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release_RO|Win32"><Configuration>Release_RO</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release_RO|x64"><Configuration>Release_RO</Configuration><Platform>x64</Platform></ProjectConfiguration>
   </ItemGroup>
 
   <PropertyGroup Label="Globals">
@@ -32,8 +36,8 @@
     <PlatformToolset Condition="'$(PlatformToolset)'==''">v143</PlatformToolset>
     <PlatformToolset Condition="!Exists('$(VCTargetsPath)') And '$(DefaultPlatformToolset)'!=''">$(DefaultPlatformToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
-    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
-    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+    <UseDebugLibraries Condition="$(Configuration.StartsWith('Debug'))">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="$(Configuration.StartsWith('Release'))">false</UseDebugLibraries>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
@@ -62,27 +66,31 @@
         the header is shared by both projects, which is what keeps the static
         library and the DLL agreeing on struct layouts.
       -->
+      <!-- Read-only builds: the gate lives in the plugin, not in lwext4 or
+           FatFs, so the libraries are identical in every configuration. -->
+      <PreprocessorDefinitions Condition="$(Configuration.EndsWith('_RO'))">TCLWEXT4_READONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions>UNICODE;_UNICODE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <!-- 4005: ext4_misc.h redefines offsetof over ucrt stddef.h -->
       <DisableSpecificWarnings>4244;4267;4996;4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <WarningLevel>Level3</WarningLevel>
-      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
-      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
-      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
-      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+      <RuntimeLibrary Condition="$(Configuration.StartsWith('Debug'))">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="$(Configuration.StartsWith('Release'))">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="$(Configuration.StartsWith('Debug'))">Disabled</Optimization>
+      <Optimization Condition="$(Configuration.StartsWith('Release'))">MaxSpeed</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions Condition="'$(Platform)'=='x64'">TCLWEXT4_WFX64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="$(Configuration.EndsWith('_RO'))">TCLWEXT4_READONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <Link>
       <ModuleDefinitionFile>$(ProjectDir)src\tclwext4.def</ModuleDefinitionFile>
       <AdditionalDependencies>comdlg32.lib;shell32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <EnableCOMDATFolding Condition="'$(Configuration)'=='Release'">true</EnableCOMDATFolding>
-      <OptimizeReferences Condition="'$(Configuration)'=='Release'">true</OptimizeReferences>
+      <EnableCOMDATFolding Condition="$(Configuration.StartsWith('Release'))">true</EnableCOMDATFolding>
+      <OptimizeReferences Condition="$(Configuration.StartsWith('Release'))">true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
 

@@ -245,6 +245,11 @@ target_link_libraries(squashfuse PUBLIC lz4 zstddec xzdec)
 set_property(TARGET squashfuse PROPERTY C_STANDARD 11)
 set_property(TARGET squashfuse PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# Read-only build. The .sln exposes this as the Debug_RO / Release_RO
+# configurations; under CMake it is a plain option, since custom CMake
+# configuration names buy nothing here.
+option(TCLWEXT4_READONLY "Disable all write support in the plugin" OFF)
+
 # ---------------------------------------------------------------------------
 # The plugin
 # ---------------------------------------------------------------------------
@@ -266,6 +271,9 @@ add_library(tclwext4 SHARED
 target_link_libraries(tclwext4 PRIVATE lwext4 fatfs squashfuse)
 target_compile_definitions(tclwext4 PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tclwext4 PRIVATE /wd4244 /wd4267 /wd4996 /wd4005)
+if(TCLWEXT4_READONLY)
+    target_compile_definitions(tclwext4 PRIVATE TCLWEXT4_READONLY)
+endif()
 target_include_directories(tclwext4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # The .rc picks OriginalFilename from this; rc.exe cannot be relied on to have
 # _WIN64 defined, so state the bitness explicitly.

@@ -16,6 +16,7 @@ void tcl_set_log_proc(int plugin_nr, tLogProcW proc)
 }
 
 bool g_debug_log = false;
+bool g_no_buffering = true;
 
 static void tcl_emit(const wchar_t *buf, bool to_debugger)
 {

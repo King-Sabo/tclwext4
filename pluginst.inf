@@ -1,6 +1,7 @@
 [plugininstall]
-description=ext2/3/4 read/write access via lwext4
+description=tclwext4 - ext2/3/4, SquashFS and FAT file system plugin
 type=wfx
 file=tclwext4.wfx
 file64=tclwext4.wfx64
 defaultdir=tclwext4
+defaultextension=

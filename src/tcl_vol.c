@@ -73,6 +73,15 @@ int tcl_ext_mount(tcl_volume *v)
     if (want_write && v->part.kind == TCL_SRC_DISK && !tcl_is_elevated())
         want_write = false;
 
+    /*
+     * Write protection is only discoverable by writing, so once a device has
+     * refused once, remember it. Otherwise every remount repeats the doomed
+     * read-write attempt, and each one dirties a superblock it cannot then
+     * write back.
+     */
+    if (want_write && v->part.write_protected)
+        want_write = false;
+
     r = tcl_bdev_open(&v->bdev, v->part.backing, v->part.offset,
                       v->part.size, v->part.sector, want_write);
     if (r != EOK)
@@ -81,13 +90,81 @@ int tcl_ext_mount(tcl_volume *v)
     /* tcl_bdev_open() downgrades on its own if the write open failed. */
     v->read_only = !v->bdev.writable;
 
+    /*
+     * Prove the block layer can read before blaming lwext4. This reads the
+     * superblock through the very handle lwext4 is about to use, with an
+     * aligned buffer, so a failure here means I/O and a success means the
+     * problem is above us.
+     */
+    {
+        uint8_t probe[1024];
+        if (tcl_read_at(v->bdev.h, v->part.offset + 1024, probe, sizeof(probe),
+                        v->part.sector))
+            tcl_dbgf(L"tclwext4: %s: superblock readback ok (magic 0x%04X)",
+                     v->part.label, (unsigned)(probe[0x38] | (probe[0x39] << 8)));
+        else
+            tcl_logf(L"tclwext4: %s: superblock readback FAILED: error %u",
+                     v->part.label, GetLastError());
+    }
+
     r = ext4_device_register(&v->bdev.bd, v->dev_name);
     if (r != EOK) {
+        tcl_logf(L"tclwext4: ext4_device_register(%S) failed (%d)", v->dev_name, r);
         tcl_bdev_close(&v->bdev);
         return r;
     }
 
     r = ext4_mount(v->dev_name, v->mp, v->read_only);
+    tcl_dbgf(L"tclwext4: ext4_mount(%S, %S, read_only=%d) returned %d",
+             v->dev_name, v->mp, (int)v->read_only, r);
+
+    /*
+     * Mounting read-write writes: lwext4 updates the superblock with the mount
+     * count, the mount time and the not-clean flag, exactly as the kernel does.
+     * On write-protected media that write is the first sign of trouble, because
+     * Windows allows the device to be OPENED for writing and only refuses at
+     * the first WriteFile.
+     *
+     * So a read-write mount failure is not final - tear down and retry
+     * read-only before giving up. tcl_bdev.writable has already been cleared by
+     * the block layer if this was write protection.
+     */
+    if (r != EOK && !v->read_only) {
+        bool protectd = !v->bdev.writable;
+
+        tcl_logf(L"tclwext4: read-write mount of %s failed (%d); retrying read-only",
+                 v->part.label, r);
+
+        ext4_device_unregister(v->dev_name);
+        tcl_bdev_close(&v->bdev);
+
+        if (tcl_bdev_open(&v->bdev, v->part.backing, v->part.offset,
+                          v->part.size, v->part.sector, false) != EOK) {
+            tcl_logf(L"tclwext4: %s: reopen read-only failed", v->part.label);
+            return EIO;
+        }
+        {
+            uint8_t probe[1024];
+            if (!tcl_read_at(v->bdev.h, v->part.offset + 1024, probe,
+                             sizeof(probe), v->part.sector))
+                tcl_logf(L"tclwext4: %s: superblock unreadable after reopen - "
+                         L"the device stopped responding after the refused write",
+                         v->part.label);
+        }
+        v->read_only = true;
+        if (protectd)
+            v->part.write_protected = true;
+        wcscat_s(v->part.ro_reason, _countof(v->part.ro_reason),
+                 protectd ? L"media-write-protected " : L"read-write-mount-failed ");
+
+        r = ext4_device_register(&v->bdev.bd, v->dev_name);
+        if (r != EOK) {
+            tcl_bdev_close(&v->bdev);
+            return r;
+        }
+        r = ext4_mount(v->dev_name, v->mp, true);
+    }
+
     if (r != EOK) {
         ext4_device_unregister(v->dev_name);
         tcl_bdev_close(&v->bdev);

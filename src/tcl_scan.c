@@ -32,7 +32,9 @@
 #define SBO_S_VOLUME_NAME    0x078
 #define SBO_S_BLOCKS_HI      0x150
 
-#define EXT4_VALID_FS        0x0001
+#define EXT4_VALID_FS        0x0001   /* s_state: cleanly unmounted     */
+#define EXT4_ERROR_FS        0x0002   /* s_state: errors were detected  */
+#define EXT_FCOM_HAS_JOURNAL 0x0004   /* s_feature_compat               */
 
 /* ro_compat bits e2fsprogs writes that lwext4 has no notion of. Named here
  * only so the "why is this read-only" message can be specific. */
@@ -118,6 +120,24 @@ bool tcl_probe_ext(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_par
      * Feature gate. Masks come straight from lwext4's own ext4_types.h, so
      * this stays in sync with whatever the submodule supports.
      */
+    /*
+     * The UUID and the write time are a fingerprint: they change whenever the
+     * filesystem is rewritten, so two scans either side of an imaging run say
+     * definitively whether anything reached the device.
+     */
+    tcl_dbgf(L"tclwext4: scan: ext at %llu: state 0x%04X compat 0x%08X "
+             L"incompat 0x%08X ro_compat 0x%08X",
+             (unsigned long long)off, state, compat, incomp, rocomp);
+    tcl_dbgf(L"tclwext4: scan: ext at %llu: uuid "
+             L"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x "
+             L"label '%s' wtime %u",
+             (unsigned long long)off,
+             p->uuid[0], p->uuid[1], p->uuid[2],  p->uuid[3],
+             p->uuid[4], p->uuid[5], p->uuid[6],  p->uuid[7],
+             p->uuid[8], p->uuid[9], p->uuid[10], p->uuid[11],
+             p->uuid[12], p->uuid[13], p->uuid[14], p->uuid[15],
+             p->fslabel, rd32(sb, 0x30));
+
     p->incompat_unsup = incomp & ~(uint32_t)(CONFIG_SUPPORTED_FINCOM);
     p->ro_unsup       = rocomp & ~(uint32_t)(CONFIG_SUPPORTED_FRO_COM);
 
@@ -139,9 +159,39 @@ bool tcl_probe_ext(HANDLE h, uint64_t off, uint64_t size, uint32_t sect, tcl_par
         p->force_ro = true;
         wcscat_s(p->ro_reason, _countof(p->ro_reason), L"mmp ");
     }
+    /*
+     * A dirty s_state is not on its own a reason to refuse writes.
+     *
+     * For a journalled filesystem the kernel clears s_state on mount and sets
+     * it again on clean unmount, while INCOMPAT_RECOVER is set only when the
+     * journal actually holds entries to replay. So "dirty, no RECOVER" means
+     * the filesystem was mounted and has nothing pending - the state a stick
+     * ends up in after an ordinary unmount that did not quite finish writing
+     * the flag, and one the kernel itself mounts read-write without comment.
+     * RECOVER is checked separately above and does force read-only.
+     *
+     * Without a journal there is no replay to have happened, so a dirty
+     * filesystem really may hold inconsistencies, and read-only stands.
+     */
     if (!(state & EXT4_VALID_FS)) {
+        if (compat & EXT_FCOM_HAS_JOURNAL) {
+            tcl_logf(L"tclwext4: scan: ext at %llu is flagged dirty (s_state 0x%04X) "
+                     L"but its journal needs no replay; mounting read-write",
+                     (unsigned long long)off, state);
+        } else {
+            p->force_ro = true;
+            wcscat_s(p->ro_reason, _countof(p->ro_reason), L"dirty-without-journal ");
+        }
+    }
+
+    /*
+     * Errors are different: something already went wrong on this filesystem and
+     * nobody has run e2fsck since. Writing more is how a recoverable problem
+     * becomes an unrecoverable one.
+     */
+    if (state & EXT4_ERROR_FS) {
         p->force_ro = true;
-        wcscat_s(p->ro_reason, _countof(p->ro_reason), L"not-cleanly-unmounted ");
+        wcscat_s(p->ro_reason, _countof(p->ro_reason), L"errors-detected-run-e2fsck ");
     }
     return true;
 }
@@ -504,8 +554,11 @@ static void scan_image(tcl_part *out, int max, int *n, const wchar_t *path)
 
     h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE)
+    if (h == INVALID_HANDLE_VALUE) {
+        tcl_logf(L"tclwext4: scan: cannot open image %s: error %u",
+                 path, GetLastError());
         return;
+    }
     if (!GetFileSizeEx(h, &sz)) {
         CloseHandle(h);
         return;
@@ -538,8 +591,21 @@ static void scan_disk(tcl_part *out, int max, int *n, int disk_no)
     swprintf_s(path, _countof(path), L"\\\\.\\PhysicalDrive%d", disk_no);
     h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
-    if (h == INVALID_HANDLE_VALUE)
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        /*
+         * ERROR_FILE_NOT_FOUND just means the drive number is unused - we probe
+         * 0..63, so most of them are. Anything else is worth seeing, especially
+         * ERROR_ACCESS_DENIED: reading \\.\PhysicalDriveN needs elevation, and
+         * without it every physical disk silently vanishes from the listing.
+         */
+        if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND)
+            tcl_logf(L"tclwext4: scan: cannot open %s: error %u%s", path, err,
+                     err == ERROR_ACCESS_DENIED
+                       ? L" (access denied - run Total Commander elevated to "
+                         L"see physical disks)" : L"");
         return;
+    }
 
     sect = tcl_query_sector_size(h);
 

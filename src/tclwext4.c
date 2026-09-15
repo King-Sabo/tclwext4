@@ -104,6 +104,38 @@ static void fill_from_dirent(WIN32_FIND_DATAW *fd, const tcl_dirent *e)
  * Tell the user why a write was refused - once per volume per session, so a
  * multi-file copy onto a read-only volume does not produce one dialog per file.
  */
+#ifdef TCLWEXT4_READONLY
+/*
+ * In a read-only build every volume is read-only for the same reason, so the
+ * per-volume explanation (elevation, superblock features, e2fsck) would be
+ * misleading. Say what is actually going on, once.
+ */
+static void warn_readonly_build(void)
+{
+    static bool warned = false;
+    wchar_t dummy[4] = { 0 };
+
+    if (warned || !g_request)
+        return;
+    warned = true;
+    g_request(g_plugin_nr, RT_MsgOK, L"tclwext4",
+              L"This is a read-only build of tclwext4.\r\n\r\n"
+              L"Browsing and copying out work normally. Writing, renaming, "
+              L"deleting and changing attributes are disabled for every "
+              L"filesystem.\r\n\r\n"
+              L"Use a normal build if you need write access.",
+              dummy, _countof(dummy));
+}
+
+#define TCL_RO_GUARD(retval)      \
+    do {                          \
+        warn_readonly_build();    \
+        return (retval);          \
+    } while (0)
+#else
+#define TCL_RO_GUARD(retval) ((void)0)
+#endif
+
 static void warn_read_only(tcl_volume *v)
 {
     wchar_t msg[512], dummy[4] = { 0 };
@@ -138,8 +170,14 @@ int __stdcall FsInitW(int PluginNr, tProgressProcW pProgressProc,
         InitializeCriticalSection(&g_ext4_cs);
         g_inited = true;
     }
-    tcl_logf(L"tclwext4 " TCLWEXT4_VER_STRINGW L" (%d-bit)",
-             (int)(sizeof(void *) * 8));
+    tcl_logf(L"tclwext4 " TCLWEXT4_VER_STRINGW L" (%d-bit)%s",
+             (int)(sizeof(void *) * 8),
+#ifdef TCLWEXT4_READONLY
+             L" read-only build"
+#else
+             L""
+#endif
+             );
     return 0;
 }
 
@@ -172,8 +210,20 @@ void __stdcall FsSetDefaultParams(FsDefaultParamStruct *dps)
     wcsncpy_s(g_ini_path_w, MAX_PATH, ini, _TRUNCATE);
     tcl_logf(L"tclwext4: settings file is %s", g_ini_path_w);
 
+#ifdef TCLWEXT4_READONLY
+    /* Not overridable: the point of this build is that it cannot write. */
+    g_global_ro  = true;
+#else
     g_global_ro  = GetPrivateProfileIntW(L"tclwext4", L"readonly", 0, ini) != 0;
+#endif
     g_debug_log  = GetPrivateProfileIntW(L"tclwext4", L"debuglog", 0, ini) != 0;
+    /*
+     * Direct (unbuffered) I/O on physical drives. On by default so reads are
+     * never served from a stale Windows cache and writes reach removable media
+     * promptly - but some storage filter drivers treat non-cached writes
+     * differently, so it can be turned off to find out.
+     */
+    g_no_buffering = GetPrivateProfileIntW(L"tclwext4", L"nobuffering", 1, ini) != 0;
 
     g_image_count = 0;
     for (i = 0; i < TCL_MAX_IMAGES; i++) {
@@ -429,6 +479,7 @@ int __stdcall FsGetFileW(WCHAR *RemoteName, WCHAR *LocalName, int CopyFlags,
 
 int __stdcall FsPutFileW(WCHAR *LocalName, WCHAR *RemoteName, int CopyFlags)
 {
+    TCL_RO_GUARD(FS_FILE_NOTSUPPORTED);
     tcl_volume *v;
     const wchar_t *rel;
     tcl_file *f;
@@ -547,6 +598,7 @@ static tcl_volume *writable_vol(const wchar_t *path)
 
 BOOL __stdcall FsMkDirW(WCHAR *Path)
 {
+    TCL_RO_GUARD(FALSE);
     tcl_volume *v;
     BOOL ok = FALSE;
 
@@ -560,6 +612,7 @@ BOOL __stdcall FsMkDirW(WCHAR *Path)
 
 BOOL __stdcall FsDeleteFileW(WCHAR *RemoteName)
 {
+    TCL_RO_GUARD(FALSE);
     tcl_volume *v;
     BOOL ok = FALSE;
 
@@ -575,6 +628,7 @@ BOOL __stdcall FsDeleteFileW(WCHAR *RemoteName)
 
 BOOL __stdcall FsRemoveDirW(WCHAR *RemoteName)
 {
+    TCL_RO_GUARD(FALSE);
     tcl_volume *v;
     BOOL ok = FALSE;
 
@@ -591,6 +645,7 @@ BOOL __stdcall FsRemoveDirW(WCHAR *RemoteName)
 int __stdcall FsRenMovFileW(WCHAR *OldName, WCHAR *NewName, BOOL Move,
                             BOOL OverWrite, RemoteInfoStruct *ri)
 {
+    TCL_RO_GUARD(FS_FILE_NOTSUPPORTED);
     tcl_volume *vo, *vn;
     const wchar_t *r1, *r2;
     tcl_dirent st;
@@ -642,6 +697,7 @@ int __stdcall FsRenMovFileW(WCHAR *OldName, WCHAR *NewName, BOOL Move,
 BOOL __stdcall FsSetTimeW(WCHAR *RemoteName, FILETIME *CreationTime,
                           FILETIME *LastAccessTime, FILETIME *LastWriteTime)
 {
+    TCL_RO_GUARD(FALSE);
     tcl_volume *v;
     BOOL ok = FALSE;
 
@@ -664,6 +720,7 @@ BOOL __stdcall FsSetTimeW(WCHAR *RemoteName, FILETIME *CreationTime,
  */
 BOOL __stdcall FsSetAttrW(WCHAR *RemoteName, int NewAttr)
 {
+    TCL_RO_GUARD(FALSE);
     tcl_volume *v;
     BOOL ok = FALSE;
 

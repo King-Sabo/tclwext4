@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  package.vcxproj - builds BOTH bitnesses and packs them into one ZIP that
+  Total Commander offers to install when you open it.
+
+  WHY A SEPARATE PROJECT
+  
+  A solution build runs MSBuild once per platform, and a .sln has no post-build
+  step, so nothing in a normal build ever sees both tclwext4.wfx and
+  tclwext4.wfx64 at the same time. This project is the hook.
+
+  HOW THE TWO PLATFORMS ARE REACHED
+  
+  In the solution this project is mapped to build under x64 ONLY (an ActiveCfg
+  line with no matching Build.0 for Win32). Its target then calls MSBuild
+  recursively on tclwext4.vcxproj for each platform in turn. The x64 pass is
+  already up to date from the normal solution build and costs nothing; the
+  Win32 pass produces the half the current build would otherwise miss.
+
+  Building it twice - once per platform - would race on the staging directory,
+  which is exactly what the single-platform mapping prevents.
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_RO|Win32"><Configuration>Debug_RO</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release_RO|Win32"><Configuration>Release_RO</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_RO|x64"><Configuration>Debug_RO</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release_RO|x64"><Configuration>Release_RO</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{2F8D6A45-71C3-4B90-8E52-A6D01F3B9C7E}</ProjectGuid>
+    <RootNamespace>package</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Utility</ConfigurationType>
+    <PlatformToolset Condition="'$(PlatformToolset)'==''">v143</PlatformToolset>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)build\dist\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\package\$(Configuration)\</IntDir>
+
+    <!-- Read-only builds get a distinct name so the two cannot be confused
+         once they are sitting next to each other on a releases page. -->
+    <PkgSuffix Condition="$(Configuration.EndsWith('_RO'))">-readonly</PkgSuffix>
+    <PkgSuffix Condition="!$(Configuration.EndsWith('_RO'))"></PkgSuffix>
+    <PkgDbg Condition="$(Configuration.StartsWith('Debug'))">-debug</PkgDbg>
+    <PkgDbg Condition="!$(Configuration.StartsWith('Debug'))"></PkgDbg>
+
+    <StageDir>$(SolutionDir)build\stage\$(Configuration)\</StageDir>
+    <PkgFile>$(OutDir)tclwext4$(PkgSuffix)$(PkgDbg).zip</PkgFile>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+  <!--
+    Getting both bitnesses without fighting MSBuild property inheritance.
+
+    Three in-process attempts failed, all for the same underlying reason: an
+    <MSBuild> task inherits the OUTER build's global properties, and
+    CurrentSolutionConfigurationContents - the solution's project-GUID-to-
+    platform map - is one of them.
+
+      1. MSBuild task on tclwext4.vcxproj with Platform=Win32. The plugin built
+         as Win32, but project references followed the inherited map to x64.
+         LNK4272.
+      2. Same, plus RemoveProperties to strip the map. Win32 worked; the x64
+         pass then had nothing to map from and fell back to each library's
+         default configuration, Debug|Win32. LNK4272 the other way.
+      3. MSBuild task on the .sln, so the solution would do the mapping. The
+         inherited map won over the one the inner solution would have computed.
+         LNK4272 again.
+
+    So run msbuild.exe as a SEPARATE PROCESS. A new process starts with no
+    inherited global properties, the solution computes its own configuration
+    map, and the reference platforms come out right. It costs one process
+    launch per package build, which is worth not having to reason about
+    property inheritance again.
+
+    /nodeReuse:false keeps this from leaving a worker process holding locks on
+    the output directory after the build finishes.
+
+    Only Win32 is built: this project is mapped to build under x64 only and
+    depends on tclwext4, so the x64 plugin already exists.
+  -->
+  <Target Name="BuildOtherPlatform">
+    <Message Importance="high" Text="Packaging: building the Win32 half of $(Configuration)" />
+
+    <Exec Command="&quot;$(MSBuildBinPath)\MSBuild.exe&quot; &quot;$(SolutionDir)tclwext4.sln&quot; /t:tclwext4 /p:Configuration=$(Configuration) /p:Platform=Win32 /v:minimal /nologo /nodeReuse:false"
+          WorkingDirectory="$(ProjectDir)" />
+  </Target>
+
+  <Target Name="StageAndZip" AfterTargets="Build" DependsOnTargets="BuildOtherPlatform">
+    <PropertyGroup>
+      <Wfx32>$(SolutionDir)build\Win32\$(Configuration)\tclwext4.wfx</Wfx32>
+      <Wfx64>$(SolutionDir)build\x64\$(Configuration)\tclwext4.wfx64</Wfx64>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(Wfx32)')" Text="Missing $(Wfx32) - the Win32 build did not produce a plugin. An LNK4272 machine-type conflict here means the project-reference platform mapping went wrong; see the comment above BuildOtherPlatform." />
+    <Error Condition="!Exists('$(Wfx64)')" Text="Missing $(Wfx64) - expected it from the solution build, since this project depends on tclwext4." />
+
+    <!-- Start from an empty staging dir: ZipDirectory packs whatever is there,
+         so a leftover file from an earlier configuration would ship. -->
+    <RemoveDir Directories="$(StageDir)" />
+    <MakeDir Directories="$(StageDir)" />
+
+    <Copy SourceFiles="$(Wfx32);$(Wfx64)" DestinationFolder="$(StageDir)" />
+    <Copy SourceFiles="$(ProjectDir)pluginst.inf;$(ProjectDir)LICENSE;$(ProjectDir)THIRD-PARTY-LICENSES.md;$(ProjectDir)README.md"
+          DestinationFolder="$(StageDir)" />
+
+    <Delete Files="$(PkgFile)" />
+    <MakeDir Directories="$(OutDir)" />
+    <ZipDirectory SourceDirectory="$(StageDir)" DestinationFile="$(PkgFile)" Overwrite="true" />
+
+    <Message Importance="high" Text="Packaged $(PkgFile)" />
+  </Target>
+
+  <Target Name="Clean">
+    <RemoveDir Directories="$(StageDir)" />
+    <Delete Files="$(PkgFile)" />
+  </Target>
+</Project>

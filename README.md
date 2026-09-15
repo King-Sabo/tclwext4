@@ -6,6 +6,9 @@ Total Commander WFX file system plugin giving access from Windows to:
 - **SquashFS** — read-only, anywhere (gzip, xz, lz4 and zstd compression)
 - **FAT12/16/32** — read/write, inside images only
 
+Released builds are **read-only**; write support is available by building from
+source. See Releases below.
+
 Unmodified upstream libraries do the filesystem work:
 [lwext4](https://github.com/gkostka/lwext4),
 [squashfuse](https://github.com/vasi/squashfuse) and
@@ -83,6 +86,8 @@ the path resolution and the symlink following are all recent code.
 
 ### Reducing the risk
 
+- Use a read-only build unless you actually need to write. It cannot corrupt
+  anything, and it is what the releases page ships.
 - Prefer image files (`[add image...]`) over live devices; a corrupted image is
   a deleted file, not a lost disk. FAT is only ever touched inside images.
 - Keep `readonly=1` in the ini unless you specifically need to write.
@@ -95,21 +100,132 @@ the path resolution and the symlink following are all recent code.
 ---
 
 
-## No binary releases
+## Configurations and packaging
 
-**None are published, and none will be. Build it yourself.**
+Four solution configurations, each for Win32 and x64:
 
-The reason is the one above: this plugin writes raw sectors through a partial
-reimplementation of ext4, with no fsck to catch the results. A downloadable
-`.wfx` is something a person drops into their plugins directory and points at a
-live disk without reading a word of this file. Requiring a Visual Studio build
-is a crude filter, but it selects for people who have at least seen the risks
-before their filesystem is at stake.
+| Configuration | Writes? |
+|---|---|
+| `Debug`, `Release` | ext and FAT read/write; SquashFS read-only |
+| `Debug_RO`, `Release_RO` | nothing writes, on any filesystem |
 
-There is a second, smaller reason: an unsigned DLL that writes to
-`\\.\PhysicalDriveN` is exactly the shape of thing you should refuse to run
-from a stranger. Building from source you have read is the honest answer to
-that, and no code-signing certificate changes it.
+The read-only gate is **in the plugin, not in the libraries** — lwext4 and FatFs
+are compiled identically in every configuration. `TCLWEXT4_READONLY` forces
+`g_global_ro` on (not overridable from the ini, unlike the normal `readonly=1`)
+and short-circuits every write entry point before it reaches a backend, so
+there is one obvious choke point rather than a gate per filesystem. The version
+resource carries `VS_FF_SPECIALBUILD` and a `SpecialBuild` string, so a
+read-only DLL identifies itself in Explorer's Properties tab.
+
+### Packaging
+
+Building the solution also produces `build\dist\tclwext4[-readonly][-debug].zip`
+containing both bitnesses, `pluginst.inf`, the licences and the README. Open it
+in Total Commander and it offers to install the plugin.
+
+`package.vcxproj` is what makes that work. A solution build runs MSBuild once
+per platform and a `.sln` has no post-build step, so nothing in a normal build
+ever sees `tclwext4.wfx` and `tclwext4.wfx64` together. The packaging project is
+mapped in the solution to build under **x64 only** — an `ActiveCfg` line with no
+matching `Build.0` for Win32 — and it depends on `tclwext4`, so the x64 plugin
+already exists when it runs. It then builds the Win32 half and zips both.
+
+**It builds that half by launching `msbuild.exe` as a separate process**, which
+looks heavy-handed until you try the alternatives:
+
+```xml
+<Exec Command="&quot;$(MSBuildBinPath)\MSBuild.exe&quot; tclwext4.sln
+               /t:tclwext4 /p:Configuration=$(Configuration) /p:Platform=Win32
+               /nodeReuse:false" />
+```
+
+An in-process `<MSBuild>` task inherits the outer build's global properties, and
+`CurrentSolutionConfigurationContents` — the solution's project-GUID-to-platform
+map — is one of them. Three variations all failed on that:
+
+1. `<MSBuild>` on `tclwext4.vcxproj` with `Platform=Win32`. The plugin compiled
+   as Win32; its project references followed the inherited map to x64. `LNK4272`
+   and 68 unresolved externals.
+2. The same plus `RemoveProperties` to strip the map. Win32 then worked, but the
+   x64 pass had nothing to map from and fell back to each library's *default*
+   configuration — the first listed in its project file, `Debug|Win32`. Same
+   error, opposite direction.
+3. `<MSBuild>` on the `.sln`, so the solution would do the mapping itself. The
+   inherited map still won over the one the inner solution would have computed.
+
+A separate process starts with no inherited global properties, so the solution
+computes its own map and the reference platforms come out right. `/nodeReuse:false`
+stops a worker process outliving the build holding locks on the output
+directory.
+
+Every one of those failures reports as dozens of unresolved externals, with a
+single `LNK4272` machine-type warning as the only real clue. If you change this,
+that warning is the thing to look for.
+
+Under CMake the read-only gate is the `TCLWEXT4_READONLY` option instead, and
+there is no packaging step — the solution is the delivery path.
+
+## Releases: read-only only
+
+**Published releases are read-only builds. If you want write access, build it
+yourself.**
+
+A read-only build cannot corrupt anything: `TCLWEXT4_READONLY` forces every
+volume read-only and short-circuits every write entry point before it reaches
+lwext4 or FatFs. Browsing an ext4 root filesystem, pulling a config file out of
+an ESP, or looking inside a SquashFS image are exactly the jobs most people
+want, and none of them can go wrong. So those are shipped: grab
+`tclwext4-readonly.zip` from the releases page, open it in Total Commander, and
+it offers to install the plugin.
+
+Write support is a different proposition. It writes raw sectors through partial
+reimplementations of ext4 and FAT, with no fsck to catch the results — the
+section above spells out why that is riskier than it sounds. A downloadable
+read/write `.wfx` is something a person drops into their plugins directory and
+points at a live disk without reading a word of this file. Requiring a Visual
+Studio build is a crude filter, but it selects for people who have at least seen
+the risks before their filesystem is at stake.
+
+Building the read/write version is not a punishment, incidentally: clone, open
+the solution, build. Every dependency is fetched automatically.
+
+There is a second, smaller reason to prefer the read-only download: an unsigned
+DLL that writes to `\\\\.\\PhysicalDriveN` is exactly the shape of thing you should
+refuse to run from a stranger. A read-only build simply has less to be nervous
+about, and no code-signing certificate changes that calculus for the writing
+one.
+
+### Telling them apart
+
+A read-only build says so in three places, so you never have to guess which
+`.wfx64` is sitting in your plugins directory:
+
+- the version resource carries `VS_FF_SPECIALBUILD` and a `SpecialBuild`
+  string, both visible in Explorer's Properties tab
+- `FileDescription` ends with `(read-only build)`
+- the startup line in the log reads `tclwext4 0.1.0 (64-bit) read-only build`
+
+The first write attempt also explains itself once, rather than failing with a
+generic error.
+
+### What CI covers
+
+`.github/workflows/build.yml` builds an 8-way matrix — `Debug`, `Release`,
+`Debug_RO`, `Release_RO`, each for x64 and Win32 — plus a CMake job (normal and
+`TCLWEXT4_READONLY=ON`) and a submodule-bootstrap job.
+
+Two checks exist because the corresponding bugs are invisible otherwise:
+
+- **The package ZIP** is verified on the x64 legs, where `package.vcxproj`
+  builds: it must exist and contain `tclwext4.wfx`, `tclwext4.wfx64` and
+  `pluginst.inf`. Cross-platform packaging has been broken three times by
+  MSBuild property inheritance, each time surfacing as unresolved externals
+  rather than anything that looks like a packaging problem.
+- **The read-only marker** is checked on `_RO` legs by reading the built DLL's
+  `FileDescription`. A read-only build that compiled without `TCLWEXT4_READONLY`
+  would pass every other check in the workflow while silently shipping write
+  support — which is the one failure that actually matters for a published
+  release.
 
 ### CI artifacts are not releases
 
@@ -125,14 +241,17 @@ submodules on purpose, to prove the `FetchLwext4` and `FetchFatFs` targets still
 work. That path once produced an empty static library rather than an
 error, so it gets its own job instead of being assumed correct.
 
-**Licensing is not the reason.** The GPL places no obstacle in the way of binary
-releases — publishing the source is already distribution, and attaching a binary
-to a release next to complete corresponding source satisfies it cleanly. Anyone
-forking this and choosing to ship binaries is free to do so under GPLv2 terms.
-One trap if you do: GitHub's auto-generated "Source code (zip)" on a release
-**omits submodule contents**, so `external/lwext4` and `external/fatfs` arrive
-empty and the archive is not complete corresponding source. Attach an archive built with
-`git-archive-all` or an equivalent instead.
+**Licensing plays no part in this.** Publishing the source is already
+distribution, so the GPL obligations attach either way, and a binary sitting
+next to complete corresponding source satisfies them cleanly. Read-only versus
+read/write is a safety judgement, not a licence one, and anyone forking this is
+free to ship read/write binaries under GPLv2 terms.
+
+One trap when attaching source to a release: GitHub's auto-generated "Source
+code (zip)" **omits submodule contents**, so `external/lwext4`,
+`external/fatfs`, `external/squashfuse` and the decompressors all arrive empty
+and the archive is not complete corresponding source. Attach an archive built
+with `git-archive-all` or an equivalent instead.
 
 ## Build
 
@@ -385,12 +504,41 @@ read-only, rather than risking corruption, when any of these hold:
 | `ro_compat` bits outside `EXT4_SUPPORTED_FRO_COM` | lwext4 would ignore semantics it does not implement |
 | `INCOMPAT_RECOVER` set | lwext4 lists this as *ignored* and will mount over an unreplayed journal |
 | `INCOMPAT_MMP` set | multi-mount protection cannot be honoured |
-| `s_state` not `EXT4_VALID_FS` | filesystem was not cleanly unmounted |
+| `s_state` dirty **and no journal** | nothing could have replayed, so inconsistencies may be real |
+| `s_state` has `EXT4_ERROR_FS` | errors were recorded and no `e2fsck` has run since |
+| the media turns out to be write protected | discovered at the first write, not at open |
 | physical drive, process not elevated | raw disk writes need admin |
 | `readonly=1` in the ini | user override |
 
 `incompat` bits outside `EXT4_SUPPORTED_FINCOM` are not read-only-able —
 those volumes are listed but refuse to mount at all.
+
+**Write-protected media is only discovered at the first write.** Windows lets a
+write-protected device be opened with `GENERIC_WRITE` and refuses with
+`ERROR_WRITE_PROTECT` when you actually write, so it cannot be detected when the
+volume is opened. It matters at mount, because mounting read-write *writes*:
+lwext4 updates the superblock with the mount count, mount time and not-clean
+flag, exactly as the kernel does. A failed read-write mount therefore tears down
+and retries read-only rather than giving up, and the volume appears with
+`media-write-protected` as its reason. Locked SD-card adapters and sticks with a
+physical switch land here.
+
+**A dirty `s_state` alone does not force read-only.** For a journalled
+filesystem the kernel clears `s_state` on mount and restores it on clean
+unmount, while `INCOMPAT_RECOVER` is set only when the journal actually holds
+entries to replay. "Dirty, no `RECOVER`" therefore means mounted-but-nothing-
+pending, which the kernel mounts read-write without comment — and it is a state
+USB sticks reach routinely after an ordinary unmount. Earlier versions refused
+writes here, which was too strict; `RECOVER` is checked separately and still
+does force read-only.
+
+`EXT4_ERROR_FS` is treated the opposite way: something already went wrong and
+nobody has run `e2fsck`, so writing more is how a recoverable problem becomes an
+unrecoverable one.
+
+Every scan now logs the raw `s_state`, `compat`, `incompat` and `ro_compat`
+words, so an unexpected read-only decision can be checked against
+`dumpe2fs -h` rather than guessed at.
 
 **Note on `orphan_file`:** `mkfs.ext4` from e2fsprogs 1.47 enables `orphan_file`,
 but that is `COMPAT_ORPHAN_FILE` — a *compat* bit, so it does not affect this gate
@@ -564,6 +712,59 @@ Capture either with
 filtered on `tclwext4`. Run DebugView elevated if Total Commander is elevated,
 or it will not see the process. `OutputDebugString` also works during the
 startup scan, before TC has supplied a log callback.
+
+## Unbuffered I/O and buffer alignment
+
+Physical drives are opened with `FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH`
+so that reads are not served from a stale Windows cache and writes reach
+removable media promptly. That flag carries a requirement that is easy to miss:
+**the caller's buffer must be sector-aligned in memory**, not just the file
+offset and transfer length.
+
+lwext4, FatFs and squashfuse all allocate their cache buffers from their own
+allocators with no such guarantee, so `tcl_bdev` checks the address and bounces
+through a page-aligned scratch buffer when needed. Without that, the first
+cached read at mount time fails with `ERROR_INVALID_PARAMETER` and surfaces as
+`ext4_mount()` returning `EIO` — a mount failure with nothing pointing at
+alignment.
+
+Images are opened buffered and have no alignment constraint, which is why this
+only ever affected physical disks. The scanner never hit it either: its buffers
+come from `VirtualAlloc` and are page-aligned by construction.
+
+## When a physical disk refuses writes
+
+On some systems a USB disk that is demonstrably writable by other tools still
+refuses writes issued by this plugin, returning `ERROR_WRITE_PROTECT` (19) on
+the first write — which for ext is lwext4's superblock update at mount time.
+
+The plugin handles this gracefully: `IOCTL_DISK_IS_WRITABLE` is checked before
+opening for write, a refused write downgrades the volume to read-only rather
+than failing the mount, and the result is remembered so later mounts do not
+retry. The volume appears with `media-write-protected` and browsing and copying
+out work normally.
+
+What has been eliminated, on a machine where this happens:
+
+| Tried | Result |
+|---|---|
+| Elevation | already elevated; the scan reads the disk fine |
+| Disk `READONLY` attribute | not set (`diskpart` → `attributes disk`) |
+| Mounted volumes needing `FSCTL_LOCK_VOLUME` | the disk has no volumes at all |
+| Exclusive handle (share mode 0) | no effect; reverted, since it blocks imaging tools |
+| Buffered instead of direct I/O (`nobuffering=0`) | no effect |
+| Whether the caller is signed | Rufus, `diskpart` and Total Commander all are |
+| Whether the region matters | `diskpart clean` writes sector 0; HxD writes inside the partition |
+
+So it is not the process, the region, the handle flags or any Windows
+arbitration rule that has been identified. Something in that environment treats
+this caller differently in a way the API surface does not expose. If you hit it,
+the practical route is to work on an image file — images are ordinary files and
+entirely unaffected — and write it to the device with an imaging tool.
+
+`nobuffering=0` in the ini switches physical disks to buffered I/O. It is left
+in as a diagnostic; direct I/O remains the default because it avoids serving
+reads from a stale Windows cache on removable media.
 
 ## Known limits
 

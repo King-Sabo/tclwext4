@@ -44,6 +44,7 @@ void tcl_dbgf(const wchar_t *fmt, ...);
 #endif
 
 extern bool g_debug_log;                     /* ini: debuglog=1 */
+extern bool g_no_buffering;                  /* ini: nobuffering=0 disables direct I/O */
 void tcl_set_log(void *plugin_nr_and_proc);  /* set by FsInitW */
 
 uint64_t tcl_filetime_from_unix(uint32_t t);
@@ -60,6 +61,9 @@ typedef struct tcl_bdev {
     HANDLE   h;                 /* disk or image file handle */
     wchar_t  path[MAX_PATH];    /* \\.\PhysicalDrive0 or C:\img.raw */
     bool     writable;          /* handle opened with GENERIC_WRITE */
+    bool     unbuffered;        /* FILE_FLAG_NO_BUFFERING: alignment matters */
+    uint8_t *bounce;            /* aligned scratch for unaligned callers */
+    size_t   bounce_len;
     CRITICAL_SECTION cs;
 } tcl_bdev;
 
@@ -108,6 +112,7 @@ typedef struct {
     uint32_t  incompat_unsup, ro_unsup;
     bool      mountable;           /* false: unsupported INCOMPAT bits */
     bool      force_ro;            /* true: mount read-only */
+    bool      write_protected;     /* learned at the first refused write */
     wchar_t   ro_reason[128];
     uint8_t   uuid[16];
     uint64_t  blocks;

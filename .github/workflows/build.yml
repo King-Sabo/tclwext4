@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [ x64, Win32 ]
-        configuration: [ Debug, Release ]
+        configuration: [ Debug, Release, Debug_RO, Release_RO ]
 
     steps:
       - uses: actions/checkout@v5
@@ -52,6 +52,42 @@ jobs:
           if (-not (Test-Path $out)) { throw "missing $out" }
           Get-Item $out | Format-List Name, Length
 
+      # package.vcxproj is mapped to build under x64 only, so the ZIP exists on
+      # the x64 legs and not the Win32 ones. This step is the regression test for
+      # the cross-platform packaging: it has been broken three times by MSBuild
+      # property inheritance, each time reporting as unresolved externals rather
+      # than anything resembling a packaging failure.
+      # A read-only build that silently compiled without the gate would pass
+      # every other check here, so confirm the marker the resource carries.
+      - name: Check the read-only marker
+        if: endsWith(matrix.configuration, '_RO')
+        shell: pwsh
+        run: |
+          $ext = if ('${{ matrix.platform }}' -eq 'x64') { 'wfx64' } else { 'wfx' }
+          $dll = "build/${{ matrix.platform }}/${{ matrix.configuration }}/tclwext4.$ext"
+          $vi  = (Get-Item $dll).VersionInfo
+          "FileDescription: $($vi.FileDescription)"
+          "SpecialBuild   : $($vi.SpecialBuild)"
+          if ($vi.FileDescription -notlike '*read-only build*') {
+            throw "$dll is not marked as a read-only build - TCLWEXT4_READONLY did not reach the compile"
+          }
+
+      - name: Check the package ZIP
+        if: matrix.platform == 'x64'
+        shell: pwsh
+        run: |
+          $ro  = if ('${{ matrix.configuration }}'.EndsWith('_RO')) { '-readonly' } else { '' }
+          $dbg = if ('${{ matrix.configuration }}'.StartsWith('Debug')) { '-debug' } else { '' }
+          $zip = "build/dist/tclwext4$ro$dbg.zip"
+          if (-not (Test-Path $zip)) { throw "packaging produced no $zip" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $names = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip)).Entries.Name
+          "Contents: $($names -join ', ')"
+          foreach ($need in 'tclwext4.wfx','tclwext4.wfx64','pluginst.inf') {
+            if ($names -notcontains $need) { throw "$zip is missing $need" }
+          }
+
       # NOT a release. Artifacts expire, require a GitHub login to fetch, and
       # exist so a contributor can confirm their change compiles - see the
       # "No binary releases" section of README.md.
@@ -59,7 +95,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: unsigned-ci-build-${{ matrix.platform }}-${{ matrix.configuration }}
-          path: build/${{ matrix.platform }}/${{ matrix.configuration }}/tclwext4.wfx*
+          path: |
+            build/${{ matrix.platform }}/${{ matrix.configuration }}/tclwext4.wfx*
+            build/dist/*.zip
           retention-days: 7
           if-no-files-found: error
 
@@ -102,6 +140,18 @@ jobs:
         run: |
           cmake --build build/x64 --config Release 2>&1 | Tee-Object ci-logs/build.txt
           if ($LASTEXITCODE -ne 0) { throw "build failed with $LASTEXITCODE" }
+
+      # The .sln expresses read-only as Debug_RO/Release_RO; CMake exposes the
+      # same gate as an option, and it needs compiling somewhere.
+      - name: Configure and build read-only
+        shell: pwsh
+        run: |
+          cmake -S . -B build/x64-ro -A x64 -DTCLWEXT4_READONLY=ON 2>&1 |
+            Tee-Object ci-logs/configure-ro.txt
+          if ($LASTEXITCODE -ne 0) { throw "read-only configure failed with $LASTEXITCODE" }
+          cmake --build build/x64-ro --config Release 2>&1 |
+            Tee-Object ci-logs/build-ro.txt
+          if ($LASTEXITCODE -ne 0) { throw "read-only build failed with $LASTEXITCODE" }
 
       - name: Check plugin was produced
         shell: pwsh
